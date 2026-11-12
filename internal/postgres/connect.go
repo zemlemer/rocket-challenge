@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
+	"rockets/pkg/helpers"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -39,13 +40,18 @@ func PoolConfig(databaseURL string) (*pgxpool.Config, error) {
 }
 
 // Connect opens a connection pool and waits until the database answers,
-// retrying with Backoff for up to timeout. The returned pool must be closed
+// retrying with helpers.Backoff for up to timeout. The returned pool must be closed
 // by the caller.
 func Connect(ctx context.Context, databaseURL string, timeout time.Duration, log *slog.Logger) (*pgxpool.Pool, error) {
 	cfg, err := PoolConfig(databaseURL)
 	if err != nil {
 		return nil, err
 	}
+	return ConnectConfig(ctx, cfg, timeout, log)
+}
+
+// ConnectConfig is Connect for an already prepared pool configuration.
+func ConnectConfig(ctx context.Context, cfg *pgxpool.Config, timeout time.Duration, log *slog.Logger) (*pgxpool.Pool, error) {
 	target := fmt.Sprintf("%s:%d/%s", cfg.ConnConfig.Host, cfg.ConnConfig.Port, cfg.ConnConfig.Database)
 
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
@@ -63,7 +69,7 @@ func Connect(ctx context.Context, databaseURL string, timeout time.Duration, log
 			return pool, nil
 		}
 
-		wait := Backoff(attempt)
+		wait := helpers.Backoff(attempt)
 		if ctx.Err() != nil || time.Now().Add(wait).After(deadline) {
 			pool.Close()
 			return nil, fmt.Errorf("database %s could not be reached within %s: %w", target, timeout, err)

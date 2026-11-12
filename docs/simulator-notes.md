@@ -84,10 +84,31 @@ It took 26 s (≈ 3,800 messages/s) against the compose stack, not the
   channels. The design sized it for 2 messages/s (200 ms polling, 500 rows per
   channel batch). With the default load, a latency target of 1 s needs this
   checked again, and probably larger batches or polling woken by
-  `LISTEN/NOTIFY`.
+  `LISTEN/NOTIFY`. *Measured below (Processing): 100 ms polling and batches
+  of 1,000 keep the oldest unprocessed entry under 600 ms.*
 - **Not observed, still assumed:**
   - duplicates and redelivery after a non-`2xx` response;
   - gaps;
   - messages after an explosion.
 
   Tests have to construct these cases themselves.
+
+## Processing (`add-message-processing`)
+
+Default simulator run against the full stack (3 servers behind nginx, 4
+processors, batch size 1,000, poll interval 100 ms), measured by the e2e test
+`TestSimulatorDefaultRun`, which samples the oldest unprocessed inbox entry
+every 100 ms:
+
+| | Undisturbed | One processor stopped 5 s into the run |
+|---|---|---|
+| Intake | 100,000 messages in 27.6 s (≈ 3,600 msg/s) | 100,000 in 26.3 s (≈ 3,800 msg/s) |
+| Oldest unprocessed entry during the run | 599 ms | 247 ms |
+| Unprocessed after the run ends | 590 ms | 8 ms |
+| State vs. recomputation from the inbox | identical for all 20 rockets | identical |
+
+A later full `make test-e2e` run measured 14 ms / 5 ms (undisturbed) and
+21 ms / 5 ms (one processor stopped). All runs stay within the targets of the
+message-processing spec (≤ 1 s, ≤ 2 s). The spread — 14 ms to 599 ms for the
+same load — points at the environment (Docker Desktop disk and CPU) rather than
+the processor; the worst case so far leaves about 400 ms of margin.

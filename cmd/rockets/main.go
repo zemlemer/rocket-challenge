@@ -33,8 +33,9 @@ type Globals struct {
 type CLI struct {
 	Globals
 
-	Migrate MigrateCmd `cmd:"" help:"Bring the database schema to the latest version."`
-	Server  ServerCmd  `cmd:"" help:"Serve the HTTP API: accept messages into the inbox."`
+	Migrate   MigrateCmd   `cmd:"" help:"Bring the database schema to the latest version."`
+	Server    ServerCmd    `cmd:"" help:"Serve the HTTP API: accept messages into the inbox."`
+	Processor ProcessorCmd `cmd:"" help:"Process the inbox: apply messages to rocket state."`
 }
 
 // needsDatabase is implemented by modes that require DATABASE_URL.

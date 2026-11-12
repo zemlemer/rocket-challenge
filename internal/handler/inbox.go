@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"rockets/pkg/helpers"
 	"time"
 )
 
@@ -61,15 +62,16 @@ func ExtractMetadata(body []byte) Metadata {
 	m := probe.Metadata
 
 	var md Metadata
-	channel, okChannel := boundedString(m.Channel)
-	number, okNumber := positiveInt64(m.MessageNumber)
+	channel, okChannel := helpers.BoundedString(m.Channel)
+	number, okNumber := helpers.NonNegativeInt(m.MessageNumber)
+	okNumber = okNumber && number >= 1
 	if okChannel && okNumber {
 		md.Identity = &Identity{Channel: channel, MessageNumber: number}
 	}
 	if t, ok := rfc3339(m.MessageTime); ok {
 		md.MessageTime = &t
 	}
-	if typ, ok := boundedString(m.MessageType); ok {
+	if typ, ok := helpers.BoundedString(m.MessageType); ok {
 		md.MessageType = &typ
 	}
 	return md

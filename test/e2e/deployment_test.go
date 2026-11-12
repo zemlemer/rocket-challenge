@@ -3,14 +3,18 @@
 package e2e
 
 import (
+	"context"
 	"net/http"
 	"os"
 	"os/exec"
+	"rockets/internal/testdb"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // Spec message-intake "Message stored", through the load balancer.
@@ -138,31 +142,112 @@ func TestCrashedReplicaIsRestarted(t *testing.T) {
 	}
 }
 
-// Spec deployment "Default simulator run". Needs the challenge's simulator
-// binary in ROCKETS_SIMULATOR; empties the inbox first.
-func TestSimulatorDefaultRun(t *testing.T) {
+// simulation is what one default simulator run against the stack measured.
+type simulation struct {
+	sent    int
+	elapsed time.Duration
+	maxAge  time.Duration // oldest unprocessed entry seen during the run
+	drained time.Duration // after the run, until nothing was unprocessed
+}
+
+// simulate empties inbox and rockets, runs the simulator with its default
+// options while sampling the oldest unprocessed entry every 100 ms, calls
+// during (if any) a few seconds into the run, and waits until everything is
+// processed.
+func simulate(t *testing.T, during func()) simulation {
+	t.Helper()
 	sim := os.Getenv("ROCKETS_SIMULATOR")
 	if sim == "" {
 		t.Skip("set ROCKETS_SIMULATOR to the simulator binary from the challenge ZIP")
 	}
-	if _, err := db(t).Exec(t.Context(), "truncate inbox"); err != nil {
+	if _, err := db(t).Exec(t.Context(), "truncate inbox, rockets"); err != nil {
 		t.Fatal(err)
 	}
-	since := time.Now().Add(-time.Second)
 
-	cmd := exec.Command(sim, "launch", baseURL+"/messages")
+	var res simulation
+	stop := make(chan struct{})
+	sampled := make(chan time.Duration)
+	go func() {
+		conn := db(t)
+		var maxAge time.Duration
+		tick := time.NewTicker(100 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			select {
+			case <-stop:
+				sampled <- maxAge
+				return
+			case <-tick.C:
+				var ms float64
+				_ = conn.QueryRow(context.Background(),
+					`select coalesce(extract(epoch from now() - min(received_at)) * 1000, 0) from inbox where processed_at is null`).Scan(&ms)
+				maxAge = max(maxAge, time.Duration(ms)*time.Millisecond)
+			}
+		}
+	}()
+	if during != nil {
+		go func() { time.Sleep(5 * time.Second); during() }()
+	}
+
 	start := time.Now()
-	out, err := cmd.CombinedOutput()
-	elapsed := time.Since(start)
+	out, err := exec.Command(sim, "launch", baseURL+"/messages").CombinedOutput()
+	res.elapsed = time.Since(start)
 	if err != nil {
 		t.Fatalf("simulator: %v\n%s", err, tail(string(out), 20))
 	}
-	sent := strings.Count(string(out), "Message sent")
-	if sent == 0 {
-		t.Fatalf("simulator sent nothing:\n%s", tail(string(out), 20))
+	res.sent = strings.Count(string(out), "Message sent")
+
+	end := time.Now()
+	for queryInt(t, `select count(*) from inbox where processed_at is null`) > 0 {
+		if time.Since(end) > 30*time.Second {
+			t.Fatal("inbox not processed 30 s after the run")
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
-	rate := float64(sent) / elapsed.Seconds()
-	t.Logf("simulator sent %d messages in %s (%.0f msg/s)", sent, elapsed.Round(time.Millisecond), rate)
+	res.drained = time.Since(end)
+	close(stop)
+	res.maxAge = <-sampled
+	t.Logf("simulator: %d messages in %s (%.0f msg/s); oldest unprocessed entry %s; drained %s after the run",
+		res.sent, res.elapsed.Round(time.Millisecond), float64(res.sent)/res.elapsed.Seconds(), res.maxAge, res.drained.Round(time.Millisecond))
+	return res
+}
+
+// assertStateMatchesInbox recomputes every rocket from the inbox (every entry
+// is kept) with the domain rules and compares it field by field.
+func assertStateMatchesInbox(t *testing.T) {
+	t.Helper()
+	pool, err := pgxpool.New(context.Background(), dbURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	want := testdb.Expected(testdb.AllEntries(t, pool))
+	if len(want) == 0 {
+		t.Fatal("no rockets expected")
+	}
+	for ch, w := range want {
+		if got := testdb.LoadRocket(t, pool, ch); testdb.Describe(got) != testdb.Describe(w) {
+			t.Fatalf("%s:\n got  %s\n want %s", ch, testdb.Describe(got), testdb.Describe(w))
+		}
+	}
+	if applied := queryInt(t, `select count(*) from inbox where outcome = 'applied'`); applied != queryInt(t, `select count(*) from inbox`) {
+		t.Fatalf("only %d entries applied", applied)
+	}
+}
+
+// Spec deployment "Default simulator run" and message-processing
+// "Throughput and freshness", plus a full correctness check of the state.
+func TestSimulatorDefaultRun(t *testing.T) {
+	since := time.Now().Add(-time.Second)
+	res := simulate(t, nil)
+
+	if res.maxAge > time.Second {
+		t.Errorf("oldest unprocessed entry was %s old, want ≤ 1 s", res.maxAge)
+	}
+	if res.drained > 2*time.Second {
+		t.Errorf("entries unprocessed for %s after the run, want ≤ 2 s", res.drained)
+	}
+	rate := float64(res.sent) / res.elapsed.Seconds()
 	if minRate, _ := strconv.ParseFloat(os.Getenv("E2E_MIN_RATE"), 64); minRate > 0 && rate < minRate {
 		t.Errorf("throughput %.0f msg/s is below E2E_MIN_RATE=%.0f; compare request_time in the nginx log", rate, minRate)
 	}
@@ -189,7 +274,17 @@ func TestSimulatorDefaultRun(t *testing.T) {
 	if incomplete := queryInt(t, `select count(*) from inbox where message_time is null or message_type is null`); incomplete != 0 {
 		t.Fatalf("%d entries lack messageTime or messageType", incomplete)
 	}
-	if rows != distinct || anonymous != 0 || distinct != sent {
-		t.Fatalf("inbox: %d rows, %d distinct identities, %d without identity; simulator sent %d", rows, distinct, anonymous, sent)
+	if rows != distinct || anonymous != 0 || distinct != res.sent {
+		t.Fatalf("inbox: %d rows, %d distinct identities, %d without identity; simulator sent %d", rows, distinct, anonymous, res.sent)
 	}
+	assertStateMatchesInbox(t)
+}
+
+// Spec deployment "One processor stopped": the others keep processing and
+// every message is applied exactly once.
+func TestSimulatorWithProcessorStopped(t *testing.T) {
+	victim := containers(t, "processor")[0]
+	t.Cleanup(func() { run(t, "docker", "start", victim) })
+	simulate(t, func() { run(t, "docker", "stop", victim) })
+	assertStateMatchesInbox(t)
 }

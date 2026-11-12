@@ -2,11 +2,13 @@ package main_test
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
 
+	"rockets/internal/postgres"
 	"rockets/internal/testdb"
 )
 
@@ -16,15 +18,20 @@ func TestMigrateModeAppliesThenReportsUpToDate(t *testing.T) {
 	if first.code != 0 {
 		t.Fatalf("first run: exit status = %d; stderr:\n%s", first.code, first.stderr)
 	}
-	for _, want := range []string{"applied migration", "name=inbox", "schema migrated", "version=1"} {
+	latest, err := postgres.LatestVersion(postgres.Migrations())
+	if err != nil {
+		t.Fatal(err)
+	}
+	version := fmt.Sprintf("version=%d", latest)
+	for _, want := range []string{"applied migration", "name=inbox", "name=processing", "schema migrated", version} {
 		if !strings.Contains(first.stderr, want) {
 			t.Fatalf("first run: log lacks %q:\n%s", want, first.stderr)
 		}
 	}
 
 	second := rockets(t, []string{"DATABASE_URL=" + url}, "migrate")
-	if second.code != 0 || !strings.Contains(second.stderr, "schema is up to date") || !strings.Contains(second.stderr, "version=1") {
-		t.Fatalf("second run: exit status = %d, want 'up to date' at version 1:\n%s", second.code, second.stderr)
+	if second.code != 0 || !strings.Contains(second.stderr, "schema is up to date") || !strings.Contains(second.stderr, version) {
+		t.Fatalf("second run: exit status = %d, want 'up to date' at %s:\n%s", second.code, version, second.stderr)
 	}
 
 	ctx := context.Background()
