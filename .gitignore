@@ -3,3 +3,4 @@
 *.out
 .env
 /tools/
+.DS_Store
