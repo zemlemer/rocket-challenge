@@ -13,6 +13,9 @@ context: |
   Correctness priorities (AGENTS.md): per-rocket ordering, idempotency,
   concurrent request safety, reliable state transitions, clear errors.
   Clean Architecture: HTTP, domain logic, persistence kept separate.
+  Code layout: per package, helpers in helpers.go and test helpers in
+  helpers_test.go; helpers used by several packages go to pkg/helpers
+  (exported); shared test helpers go to internal/testdb.
 
 rules:
   design:
