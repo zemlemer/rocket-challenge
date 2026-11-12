@@ -7,14 +7,11 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"rockets/internal/testdb"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // Spec message-intake "Message stored", through the load balancer.
@@ -212,26 +209,92 @@ func simulate(t *testing.T, during func()) simulation {
 	return res
 }
 
-// assertStateMatchesInbox recomputes every rocket from the inbox (every entry
-// is kept) with the domain rules and compares it field by field.
+// assertStateMatchesInbox independently recomputes rocket state in SQL from
+// applied inbox messages, without using the processor's domain implementation.
 func assertStateMatchesInbox(t *testing.T) {
 	t.Helper()
-	pool, err := pgxpool.New(context.Background(), dbURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pool.Close()
-	want := testdb.Expected(testdb.AllEntries(t, pool))
-	if len(want) == 0 {
-		t.Fatal("no rockets expected")
-	}
-	for ch, w := range want {
-		if got := testdb.LoadRocket(t, pool, ch); testdb.Describe(got) != testdb.Describe(w) {
-			t.Fatalf("%s:\n got  %s\n want %s", ch, testdb.Describe(got), testdb.Describe(w))
-		}
-	}
 	if applied := queryInt(t, `select count(*) from inbox where outcome = 'applied'`); applied != queryInt(t, `select count(*) from inbox`) {
 		t.Fatalf("only %d entries applied", applied)
+	}
+	if n := queryInt(t, `select count(*) from rockets`); n == 0 {
+		t.Fatal("no rockets stored")
+	}
+
+	// Each applied body is conforming JSON. The query derives state from event
+	// fields rather than calling Fold/Apply, and the full join catches missing
+	// and unexpected rocket rows as well as incorrect column values.
+	const compare = `
+		with applied as (
+			select channel, message_number, message_time, message_type,
+			       convert_from(body, 'UTF8')::jsonb -> 'message' as payload
+			from inbox where outcome = 'applied'
+		), speed as (
+			select channel, sum(case message_type
+				when 'RocketLaunched' then (payload ->> 'launchSpeed')::bigint
+				when 'RocketSpeedIncreased' then (payload ->> 'by')::bigint
+				when 'RocketSpeedDecreased' then -(payload ->> 'by')::bigint
+				else 0 end)::bigint as speed
+			from applied group by channel
+		), launch as (
+			select channel, payload ->> 'type' as rocket_type,
+			       (payload ->> 'launchSpeed')::bigint as launch_speed,
+			       message_time as launched_at
+			from applied where message_type = 'RocketLaunched'
+		), mission as (
+			select distinct on (channel) channel, message_number as mission_message_number,
+			       case message_type when 'RocketLaunched' then payload ->> 'mission'
+			                         else payload ->> 'newMission' end as mission
+			from applied where message_type in ('RocketLaunched', 'RocketMissionChanged')
+			order by channel, message_number desc
+		), explosion as (
+			select channel, payload ->> 'reason' as explosion_reason
+			from applied where message_type = 'RocketExploded'
+		), latest as (
+			select distinct on (channel) channel, message_number as last_applied_message_number,
+			       message_time as last_applied_message_at
+			from applied order by channel, message_number desc
+		), expected as (
+			select s.channel, s.speed, l.rocket_type, l.launch_speed, l.launched_at,
+			       m.mission, coalesce(m.mission_message_number, 0) as mission_message_number,
+			       x.explosion_reason, z.last_applied_message_number, z.last_applied_message_at
+			from speed s
+			left join launch l using (channel)
+			left join mission m using (channel)
+			left join explosion x using (channel)
+			join latest z using (channel)
+		), actual as (
+			select channel, speed, rocket_type, launch_speed, launched_at, mission,
+			       mission_message_number, explosion_reason, last_applied_message_number,
+			       last_applied_message_at from rockets
+		)
+		select coalesce(e.channel, a.channel),
+		       coalesce(to_jsonb(e)::text, '<missing>'),
+		       coalesce(to_jsonb(a)::text, '<missing>')
+		from expected e full join actual a using (channel)
+		where e.channel is null or a.channel is null or
+		      row(e.speed, e.rocket_type, e.launch_speed, e.launched_at, e.mission,
+		          e.mission_message_number, e.explosion_reason, e.last_applied_message_number,
+		          e.last_applied_message_at)
+		      is distinct from
+		      row(a.speed, a.rocket_type, a.launch_speed, a.launched_at, a.mission,
+		          a.mission_message_number, a.explosion_reason, a.last_applied_message_number,
+		          a.last_applied_message_at)
+		order by 1`
+	rows, err := db(t).Query(t.Context(), compare)
+	if err != nil {
+		t.Fatalf("recompute state from inbox: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var channel string
+		var expected, actual string
+		if err := rows.Scan(&channel, &expected, &actual); err != nil {
+			t.Fatal(err)
+		}
+		t.Errorf("rocket %s differs from inbox:\n expected %v\n actual   %v", channel, expected, actual)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
 	}
 }
 
