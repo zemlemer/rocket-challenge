@@ -1,0 +1,7 @@
+.git
+.claude
+bin
+openspec
+docs
+*.md
+!internal/postgres/migrations/README.md

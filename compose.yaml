@@ -1,0 +1,34 @@
+name: rockets
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: rockets
+      POSTGRES_PASSWORD: rockets
+      POSTGRES_DB: rockets
+    ports:
+      - "${ROCKETS_PG_PORT:-15432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rockets -d rockets"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # One-shot schema migration. Services that need the schema declare:
+  #   depends_on: { migrate: { condition: service_completed_successfully } }
+  migrate:
+    build: .
+    image: rockets:dev
+    command: ["migrate"]
+    environment:
+      DATABASE_URL: postgres://rockets:rockets@postgres:5432/rockets?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+volumes:
+  pgdata:
