@@ -9,6 +9,7 @@ subcommand:
 ```sh
 rockets --help            # list modes
 rockets server --help     # options of a mode
+rockets processor        # inbox processing
 ```
 
 | Option | Environment | Default |
@@ -32,6 +33,7 @@ curl localhost:8088/healthz
 | `postgres` | PostgreSQL 16 on a named volume, host port `15432` |
 | `migrate` | one-shot `rockets migrate`, runs after PostgreSQL is healthy |
 | `server` ×3 | `rockets server`, start after PostgreSQL is healthy and `migrate` succeeded, no published ports |
+| `processor` ×4 | `rockets processor`, start after PostgreSQL is healthy and `migrate` succeeded, no ports |
 | `nginx` | entry point on `localhost:8088`, round-robin over the servers, retries a failed request on another replica |
 
 Point the provided simulator (the binary from the challenge ZIP; keep it as
@@ -64,6 +66,45 @@ inbox is not stored twice. Inspect the inbox:
 ```sh
 docker compose exec postgres psql -U rockets -d rockets -c \
   "select id, channel, message_number, message_time, message_type, truncated, left(encode(body, 'escape'), 80) as body from inbox order by id desc limit 5"
+```
+
+## Processor mode
+
+`rockets processor` turns inbox entries into rocket state. It has no options of
+its own: batch size (1,000 entries per transaction), poll interval for an empty
+inbox (100 ms) and shutdown timeout (15 s) are fixed in
+[internal/processor](internal/processor/processor.go). It serves no HTTP.
+
+Each batch is one transaction: claim the oldest unprocessed entries
+(`FOR UPDATE SKIP LOCKED`, so processors never take the same entry), validate
+them, apply them, mark them. Entries are never deleted; every entry ends with
+an outcome:
+
+| `outcome` | Meaning |
+|---|---|
+| `applied` | the message changed its rocket's state |
+| `quarantined` | the message is not valid (`reason` names the rule) and changed nothing |
+| `failed` | a valid message the system could not apply (`reason` holds the error); a bug to investigate |
+
+How a rocket's state is computed, independently of arrival order:
+
+- **speed** = launch speed + increases − decreases, applied as increments, never clamped;
+- **mission** from the message with the highest number (`mission_message_number`);
+- **launch** only as message number 1, and message 1 only as a launch;
+- **explosion** once and terminal; a further `RocketExploded` is quarantined;
+- **`last_applied_message_number` / `last_applied_message_at`**: the newest applied message.
+
+`by` and `launchSpeed` must be integers from 0 to 1,000,000,000.
+
+Inspect processing:
+
+```sh
+docker compose exec postgres psql -U rockets -d rockets -c \
+  "select outcome, count(*) from inbox group by 1"
+docker compose exec postgres psql -U rockets -d rockets -c \
+  "select id, channel, message_number, message_type, reason from inbox where outcome <> 'applied' order by id desc limit 10"
+docker compose exec postgres psql -U rockets -d rockets -c \
+  "select channel, rocket_type, speed, mission, explosion_reason, last_applied_message_number from rockets order by channel"
 ```
 
 ## Database migrations

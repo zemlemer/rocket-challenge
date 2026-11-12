@@ -78,8 +78,15 @@ func startServerArgs(t *testing.T, url string, extra ...string) *serverProc {
 	}
 	addr := l.Addr().String()
 	_ = l.Close()
+	p := startProcess(t, url, "listening", append([]string{"server", "--http-addr", addr}, extra...)...)
+	p.addr = addr
+	return p
+}
 
-	cmd := exec.Command(binary, append([]string{"server", "--http-addr", addr}, extra...)...)
+// startProcess runs the binary with args and waits until its log contains ready.
+func startProcess(t *testing.T, url, ready string, args ...string) *serverProc {
+	t.Helper()
+	cmd := exec.Command(binary, args...)
 	cmd.Env = append(cmd.Environ(), "DATABASE_URL="+url, "LOG_LEVEL=debug")
 	pipe, err := cmd.StderrPipe()
 	if err != nil {
@@ -88,15 +95,15 @@ func startServerArgs(t *testing.T, url string, extra ...string) *serverProc {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	p := &serverProc{cmd: cmd, addr: addr, stderr: &strings.Builder{}, done: make(chan error, 1)}
-	listening := make(chan struct{})
+	p := &serverProc{cmd: cmd, stderr: &strings.Builder{}, done: make(chan error, 1)}
+	started := make(chan struct{})
 	go func() {
 		sc := bufio.NewScanner(pipe)
 		closed := false
 		for sc.Scan() {
 			p.stderr.WriteString(sc.Text() + "\n")
-			if !closed && strings.Contains(sc.Text(), "listening") {
-				close(listening)
+			if !closed && strings.Contains(sc.Text(), ready) {
+				close(started)
 				closed = true
 			}
 		}
@@ -105,11 +112,11 @@ func startServerArgs(t *testing.T, url string, extra ...string) *serverProc {
 	t.Cleanup(func() { _ = cmd.Process.Kill() })
 
 	select {
-	case <-listening:
+	case <-started:
 	case err := <-p.done:
-		t.Fatalf("server exited early: %v\n%s", err, p.stderr)
+		t.Fatalf("%s exited early: %v\n%s", args[0], err, p.stderr)
 	case <-time.After(15 * time.Second):
-		t.Fatalf("server did not start:\n%s", p.stderr)
+		t.Fatalf("%s did not start:\n%s", args[0], p.stderr)
 	}
 	return p
 }

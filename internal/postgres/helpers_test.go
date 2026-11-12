@@ -2,6 +2,7 @@ package postgres_test
 
 import (
 	"context"
+	"io/fs"
 	"rockets/internal/postgres"
 	"rockets/internal/testdb"
 	"testing"
@@ -60,3 +61,5 @@ func migratedPool(t *testing.T) *pgxpool.Pool {
 	_, p := testdb.Migrated(t)
 	return p
 }
+
+func fsReadFile(fsys fs.FS, name string) ([]byte, error) { return fs.ReadFile(fsys, name) }

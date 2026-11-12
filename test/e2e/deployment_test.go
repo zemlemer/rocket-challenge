@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"context"
 	"net/http"
 	"os"
 	"os/exec"
@@ -138,31 +139,178 @@ func TestCrashedReplicaIsRestarted(t *testing.T) {
 	}
 }
 
-// Spec deployment "Default simulator run". Needs the challenge's simulator
-// binary in ROCKETS_SIMULATOR; empties the inbox first.
-func TestSimulatorDefaultRun(t *testing.T) {
+// simulation is what one default simulator run against the stack measured.
+type simulation struct {
+	sent    int
+	elapsed time.Duration
+	maxAge  time.Duration // oldest unprocessed entry seen during the run
+	drained time.Duration // after the run, until nothing was unprocessed
+}
+
+// simulate empties inbox and rockets, runs the simulator with its default
+// options while sampling the oldest unprocessed entry every 100 ms, calls
+// during (if any) a few seconds into the run, and waits until everything is
+// processed.
+func simulate(t *testing.T, during func()) simulation {
+	t.Helper()
 	sim := os.Getenv("ROCKETS_SIMULATOR")
 	if sim == "" {
 		t.Skip("set ROCKETS_SIMULATOR to the simulator binary from the challenge ZIP")
 	}
-	if _, err := db(t).Exec(t.Context(), "truncate inbox"); err != nil {
+	if _, err := db(t).Exec(t.Context(), "truncate inbox, rockets"); err != nil {
 		t.Fatal(err)
 	}
-	since := time.Now().Add(-time.Second)
 
-	cmd := exec.Command(sim, "launch", baseURL+"/messages")
+	var res simulation
+	stop := make(chan struct{})
+	sampled := make(chan time.Duration)
+	go func() {
+		conn := db(t)
+		var maxAge time.Duration
+		tick := time.NewTicker(100 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			select {
+			case <-stop:
+				sampled <- maxAge
+				return
+			case <-tick.C:
+				var ms float64
+				_ = conn.QueryRow(context.Background(),
+					`select coalesce(extract(epoch from now() - min(received_at)) * 1000, 0) from inbox where processed_at is null`).Scan(&ms)
+				maxAge = max(maxAge, time.Duration(ms)*time.Millisecond)
+			}
+		}
+	}()
+	if during != nil {
+		go func() { time.Sleep(5 * time.Second); during() }()
+	}
+
 	start := time.Now()
-	out, err := cmd.CombinedOutput()
-	elapsed := time.Since(start)
+	out, err := exec.Command(sim, "launch", baseURL+"/messages").CombinedOutput()
+	res.elapsed = time.Since(start)
 	if err != nil {
 		t.Fatalf("simulator: %v\n%s", err, tail(string(out), 20))
 	}
-	sent := strings.Count(string(out), "Message sent")
-	if sent == 0 {
-		t.Fatalf("simulator sent nothing:\n%s", tail(string(out), 20))
+	res.sent = strings.Count(string(out), "Message sent")
+
+	end := time.Now()
+	for queryInt(t, `select count(*) from inbox where processed_at is null`) > 0 {
+		if time.Since(end) > 30*time.Second {
+			t.Fatal("inbox not processed 30 s after the run")
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
-	rate := float64(sent) / elapsed.Seconds()
-	t.Logf("simulator sent %d messages in %s (%.0f msg/s)", sent, elapsed.Round(time.Millisecond), rate)
+	res.drained = time.Since(end)
+	close(stop)
+	res.maxAge = <-sampled
+	t.Logf("simulator: %d messages in %s (%.0f msg/s); oldest unprocessed entry %s; drained %s after the run",
+		res.sent, res.elapsed.Round(time.Millisecond), float64(res.sent)/res.elapsed.Seconds(), res.maxAge, res.drained.Round(time.Millisecond))
+	return res
+}
+
+// assertStateMatchesInbox independently recomputes rocket state in SQL from
+// applied inbox messages, without using the processor's domain implementation.
+func assertStateMatchesInbox(t *testing.T) {
+	t.Helper()
+	if applied := queryInt(t, `select count(*) from inbox where outcome = 'applied'`); applied != queryInt(t, `select count(*) from inbox`) {
+		t.Fatalf("only %d entries applied", applied)
+	}
+	if n := queryInt(t, `select count(*) from rockets`); n == 0 {
+		t.Fatal("no rockets stored")
+	}
+
+	// Each applied body is conforming JSON. The query derives state from event
+	// fields rather than calling Fold/Apply, and the full join catches missing
+	// and unexpected rocket rows as well as incorrect column values.
+	const compare = `
+		with applied as (
+			select channel, message_number, message_time, message_type,
+			       convert_from(body, 'UTF8')::jsonb -> 'message' as payload
+			from inbox where outcome = 'applied'
+		), speed as (
+			select channel, sum(case message_type
+				when 'RocketLaunched' then (payload ->> 'launchSpeed')::bigint
+				when 'RocketSpeedIncreased' then (payload ->> 'by')::bigint
+				when 'RocketSpeedDecreased' then -(payload ->> 'by')::bigint
+				else 0 end)::bigint as speed
+			from applied group by channel
+		), launch as (
+			select channel, payload ->> 'type' as rocket_type,
+			       (payload ->> 'launchSpeed')::bigint as launch_speed,
+			       message_time as launched_at
+			from applied where message_type = 'RocketLaunched'
+		), mission as (
+			select distinct on (channel) channel, message_number as mission_message_number,
+			       case message_type when 'RocketLaunched' then payload ->> 'mission'
+			                         else payload ->> 'newMission' end as mission
+			from applied where message_type in ('RocketLaunched', 'RocketMissionChanged')
+			order by channel, message_number desc
+		), explosion as (
+			select channel, payload ->> 'reason' as explosion_reason
+			from applied where message_type = 'RocketExploded'
+		), latest as (
+			select distinct on (channel) channel, message_number as last_applied_message_number,
+			       message_time as last_applied_message_at
+			from applied order by channel, message_number desc
+		), expected as (
+			select s.channel, s.speed, l.rocket_type, l.launch_speed, l.launched_at,
+			       m.mission, coalesce(m.mission_message_number, 0) as mission_message_number,
+			       x.explosion_reason, z.last_applied_message_number, z.last_applied_message_at
+			from speed s
+			left join launch l using (channel)
+			left join mission m using (channel)
+			left join explosion x using (channel)
+			join latest z using (channel)
+		), actual as (
+			select channel, speed, rocket_type, launch_speed, launched_at, mission,
+			       mission_message_number, explosion_reason, last_applied_message_number,
+			       last_applied_message_at from rockets
+		)
+		select coalesce(e.channel, a.channel),
+		       coalesce(to_jsonb(e)::text, '<missing>'),
+		       coalesce(to_jsonb(a)::text, '<missing>')
+		from expected e full join actual a using (channel)
+		where e.channel is null or a.channel is null or
+		      row(e.speed, e.rocket_type, e.launch_speed, e.launched_at, e.mission,
+		          e.mission_message_number, e.explosion_reason, e.last_applied_message_number,
+		          e.last_applied_message_at)
+		      is distinct from
+		      row(a.speed, a.rocket_type, a.launch_speed, a.launched_at, a.mission,
+		          a.mission_message_number, a.explosion_reason, a.last_applied_message_number,
+		          a.last_applied_message_at)
+		order by 1`
+	rows, err := db(t).Query(t.Context(), compare)
+	if err != nil {
+		t.Fatalf("recompute state from inbox: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var channel string
+		var expected, actual string
+		if err := rows.Scan(&channel, &expected, &actual); err != nil {
+			t.Fatal(err)
+		}
+		t.Errorf("rocket %s differs from inbox:\n expected %v\n actual   %v", channel, expected, actual)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Spec deployment "Default simulator run" and message-processing
+// "Throughput and freshness", plus a full correctness check of the state.
+func TestSimulatorDefaultRun(t *testing.T) {
+	since := time.Now().Add(-time.Second)
+	res := simulate(t, nil)
+
+	if res.maxAge > time.Second {
+		t.Errorf("oldest unprocessed entry was %s old, want ≤ 1 s", res.maxAge)
+	}
+	if res.drained > 2*time.Second {
+		t.Errorf("entries unprocessed for %s after the run, want ≤ 2 s", res.drained)
+	}
+	rate := float64(res.sent) / res.elapsed.Seconds()
 	if minRate, _ := strconv.ParseFloat(os.Getenv("E2E_MIN_RATE"), 64); minRate > 0 && rate < minRate {
 		t.Errorf("throughput %.0f msg/s is below E2E_MIN_RATE=%.0f; compare request_time in the nginx log", rate, minRate)
 	}
@@ -189,7 +337,17 @@ func TestSimulatorDefaultRun(t *testing.T) {
 	if incomplete := queryInt(t, `select count(*) from inbox where message_time is null or message_type is null`); incomplete != 0 {
 		t.Fatalf("%d entries lack messageTime or messageType", incomplete)
 	}
-	if rows != distinct || anonymous != 0 || distinct != sent {
-		t.Fatalf("inbox: %d rows, %d distinct identities, %d without identity; simulator sent %d", rows, distinct, anonymous, sent)
+	if rows != distinct || anonymous != 0 || distinct != res.sent {
+		t.Fatalf("inbox: %d rows, %d distinct identities, %d without identity; simulator sent %d", rows, distinct, anonymous, res.sent)
 	}
+	assertStateMatchesInbox(t)
+}
+
+// Spec deployment "One processor stopped": the others keep processing and
+// every message is applied exactly once.
+func TestSimulatorWithProcessorStopped(t *testing.T) {
+	victim := containers(t, "processor")[0]
+	t.Cleanup(func() { run(t, "docker", "start", victim) })
+	simulate(t, func() { run(t, "docker", "stop", victim) })
+	assertStateMatchesInbox(t)
 }

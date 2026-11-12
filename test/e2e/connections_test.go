@@ -63,10 +63,9 @@ func TestStopGracePeriodExceedsShutdownTimeout(t *testing.T) {
 	}
 }
 
-// Spec deployment "Server replicas": servers start only after PostgreSQL is
-// healthy and migrate has completed (the server itself does not ping the
-// database for health).
-func TestServersStartAfterDatabaseAndMigrate(t *testing.T) {
+// Spec deployment "Server replicas" and "Processor replicas": servers and
+// processors start only after PostgreSQL is healthy and migrate has completed.
+func TestServicesStartAfterDatabaseAndMigrate(t *testing.T) {
 	var cfg struct {
 		Services map[string]struct {
 			DependsOn map[string]struct {
@@ -77,10 +76,27 @@ func TestServersStartAfterDatabaseAndMigrate(t *testing.T) {
 	if err := json.Unmarshal([]byte(compose(t, "config", "--format", "json")), &cfg); err != nil {
 		t.Fatal(err)
 	}
-	deps := cfg.Services["server"].DependsOn
-	for svc, want := range map[string]string{"postgres": "service_healthy", "migrate": "service_completed_successfully"} {
-		if got := deps[svc].Condition; got != want {
-			t.Errorf("server depends on %s with condition %q, want %q", svc, got, want)
+	for _, service := range []string{"server", "processor"} {
+		deps := cfg.Services[service].DependsOn
+		for svc, want := range map[string]string{"postgres": "service_healthy", "migrate": "service_completed_successfully"} {
+			if got := deps[svc].Condition; got != want {
+				t.Errorf("%s depends on %s with condition %q, want %q", service, svc, got, want)
+			}
+		}
+	}
+}
+
+// Spec deployment "Processor replicas": four processors run, each with a stop
+// grace period longer than its 15 s shutdown timeout.
+func TestFourProcessorsRunning(t *testing.T) {
+	procs := containers(t, "processor")
+	if len(procs) != 4 {
+		t.Fatalf("%d processor containers running, want 4", len(procs))
+	}
+	for _, c := range procs {
+		grace, err := strconv.Atoi(strings.TrimSpace(run(t, "docker", "inspect", "-f", "{{.Config.StopTimeout}}", c)))
+		if err != nil || grace <= 15 {
+			t.Errorf("%s: stop grace period %d s, want > 15 s (%v)", c, grace, err)
 		}
 	}
 }

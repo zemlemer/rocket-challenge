@@ -1,0 +1,207 @@
+package integration
+
+import (
+	"context"
+	"errors"
+	"math/rand/v2"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"rockets/internal/domain"
+	"rockets/internal/handler"
+	"rockets/internal/postgres"
+	"rockets/internal/processor"
+	"rockets/internal/repository"
+	"rockets/internal/testdb"
+)
+
+// runProcessors starts n processors and returns a stop function.
+func runProcessors(t *testing.T, repo processor.Repository, n int) func() {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	for range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			p := processor.New(repo, testdb.Logger(), processor.WithBatchSize(7), processor.WithPollInterval(5*time.Millisecond))
+			_ = p.Run(ctx)
+		}()
+	}
+	stopped := false
+	stop := func() {
+		if !stopped {
+			cancel()
+			wg.Wait()
+			stopped = true
+		}
+	}
+	t.Cleanup(stop)
+	return stop
+}
+
+// Spec message-processing "Four processors, shuffled stream" and
+// "Concurrent processors": entries arrive while four processors run.
+func TestFourProcessorsMatchReference(t *testing.T) {
+	url, p := testdb.Migrated(t)
+	ms := messages(rand.New(rand.NewPCG(1, 2)), 6, 60)
+	insertAll(t, p, ms[:len(ms)/2])
+	stop := runProcessors(t, repository.NewProcessing(limitedPool(t, url, postgres.ProcessorLimits), testdb.Logger()), 4)
+	insertAll(t, p, ms[len(ms)/2:])
+	waitProcessed(t, p, 30*time.Second)
+	stop()
+	assertMatchesReference(t, p)
+}
+
+// Spec "Crash safety": the database goes away in the middle of a batch; the
+// batch has no effect and a re-run applies everything once.
+func TestBatchInterruptedMidwayIsReappliedOnce(t *testing.T) {
+	url, p := testdb.Migrated(t)
+	insertAll(t, p, messages(rand.New(rand.NewPCG(3, 4)), 3, 20))
+	proxy, proxied := testdb.NewProxy(t, url)
+	repo := repository.NewProcessing(testdb.Pool(t, proxied), testdb.Logger())
+
+	breakMidway := func(es []domain.InboxEntry) domain.BatchResult {
+		proxy.Stop() // after the claim, before the updates
+		return domain.Fold(es)
+	}
+	_, err := repo.ProcessBatch(context.Background(), 1000, breakMidway)
+	if !errors.Is(err, processor.ErrUnavailable) {
+		t.Fatalf("err = %v, want ErrUnavailable", err)
+	}
+	if unprocessed(t, p) != 60 {
+		t.Fatalf("interrupted batch marked entries: %d unprocessed", unprocessed(t, p))
+	}
+	var rockets int
+	_ = p.QueryRow(context.Background(), `select count(*) from rockets`).Scan(&rockets)
+	if rockets != 0 {
+		t.Fatalf("interrupted batch left %d rockets", rockets)
+	}
+
+	proxy.Start()
+	for {
+		n, err := repo.ProcessBatch(context.Background(), 1000, domain.Fold)
+		if err != nil && !errors.Is(err, processor.ErrUnavailable) {
+			t.Fatal(err)
+		}
+		if err == nil && n == 0 {
+			break
+		}
+	}
+	assertMatchesReference(t, p)
+}
+
+// Spec "Recovery from storage outage": a running processor resumes by itself.
+func TestProcessorResumesAfterOutage(t *testing.T) {
+	url, p := testdb.Migrated(t)
+	proxy, proxied := testdb.NewProxy(t, url)
+	stop := runProcessors(t, repository.NewProcessing(testdb.Pool(t, proxied), testdb.Logger()), 1)
+	proxy.Stop()
+	insertAll(t, p, messages(rand.New(rand.NewPCG(5, 6)), 2, 15))
+	time.Sleep(time.Second)
+	if unprocessed(t, p) != 30 {
+		t.Fatal("entries processed while the database was unreachable")
+	}
+	proxy.Start()
+	waitProcessed(t, p, 10*time.Second)
+	stop()
+	assertMatchesReference(t, p)
+}
+
+// Spec "Stuck processors do not block others": a session that claims a batch
+// and then hangs loses its claim when Postgres ends the idle transaction.
+func TestStuckTransactionLosesItsClaim(t *testing.T) {
+	url, p := testdb.Migrated(t)
+	insertAll(t, p, messages(rand.New(rand.NewPCG(7, 8)), 2, 10))
+	short := postgres.SessionLimits{IdleInTransaction: time.Second, Statement: 30 * time.Second, Lock: 5 * time.Second}
+	stuckPool := limitedPool(t, url, short)
+	ctx := context.Background()
+
+	stuck, err := stuckPool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stuck.Exec(ctx, `select id from inbox where processed_at is null for update skip locked`); err != nil {
+		t.Fatal(err)
+	}
+	// The stuck "processor" now does nothing.
+
+	repo := repository.NewProcessing(testdb.Pool(t, url), testdb.Logger())
+	if n, err := repo.ProcessBatch(ctx, 1000, domain.Fold); err != nil || n != 0 {
+		t.Fatalf("claimed entries locked by the stuck session: n=%d err=%v", n, err)
+	}
+	time.Sleep(1500 * time.Millisecond) // > idle_in_transaction_session_timeout
+	if n, err := repo.ProcessBatch(ctx, 1000, domain.Fold); err != nil || n != 20 {
+		t.Fatalf("after the timeout: n=%d err=%v, want 20", n, err)
+	}
+	if err := stuck.Commit(ctx); err == nil {
+		t.Fatal("the stuck transaction could still commit")
+	}
+	assertMatchesReference(t, p)
+}
+
+// A processor blocked on a locked rocket row gives up after lock_timeout,
+// marks nothing, and succeeds once the row is free.
+func TestBlockedOnRocketRowBacksOff(t *testing.T) {
+	url, p := testdb.Migrated(t)
+	ctx := context.Background()
+	testdb.InsertEntry(t, p, "c", 1, domain.TypeLaunched, `{"type":"A","launchSpeed":1,"mission":"M"}`)
+	repo := repository.NewProcessing(limitedPool(t, url, postgres.SessionLimits{IdleInTransaction: 30 * time.Second, Statement: 30 * time.Second, Lock: 300 * time.Millisecond}), testdb.Logger())
+	if _, err := repo.ProcessBatch(ctx, 10, domain.Fold); err != nil {
+		t.Fatal(err)
+	}
+	testdb.InsertEntry(t, p, "c", 2, domain.TypeSpeedIncreased, `{"by":5}`)
+
+	holder, err := p.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := holder.Exec(ctx, `select 1 from rockets where channel = 'c' for update`); err != nil {
+		t.Fatal(err)
+	}
+	_, err = repo.ProcessBatch(ctx, 10, domain.Fold)
+	if !errors.Is(err, processor.ErrUnavailable) {
+		t.Fatalf("err = %v, want ErrUnavailable after lock_timeout", err)
+	}
+	if unprocessed(t, p) != 1 {
+		t.Fatal("entry was marked although its batch gave up")
+	}
+	_ = holder.Rollback(ctx)
+	if n, err := repo.ProcessBatch(ctx, 10, domain.Fold); err != nil || n != 1 {
+		t.Fatalf("after release: n=%d err=%v", n, err)
+	}
+	if testdb.LoadRocket(t, p, "c").Speed != 6 {
+		t.Fatal("increment not applied")
+	}
+}
+
+// Spec message-intake (modified) "Redelivery after processing".
+func TestRedeliveryOfProcessedMessageIsDroppedAtIntake(t *testing.T) {
+	_, p := testdb.Migrated(t)
+	intake := &handler.Messages{Repo: repository.NewInbox(p), Log: testdb.Logger()}
+	const body = `{"metadata":{"channel":"c","messageNumber":1,"messageTime":"2022-02-02T19:39:05Z","messageType":"RocketLaunched"},"message":{"type":"A","launchSpeed":500,"mission":"M"}}`
+	post := func() int {
+		rec := httptest.NewRecorder()
+		intake.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/messages", strings.NewReader(body)))
+		return rec.Code
+	}
+	if post() != http.StatusAccepted {
+		t.Fatal("first delivery not accepted")
+	}
+	repo := repository.NewProcessing(p, testdb.Logger())
+	if _, err := repo.ProcessBatch(context.Background(), 10, domain.Fold); err != nil {
+		t.Fatal(err)
+	}
+	if post() != http.StatusAccepted {
+		t.Fatal("redelivery not answered 202")
+	}
+	var entries int
+	_ = p.QueryRow(context.Background(), `select count(*) from inbox`).Scan(&entries)
+	if entries != 1 || unprocessed(t, p) != 0 || testdb.LoadRocket(t, p, "c").Speed != 500 {
+		t.Fatalf("entries=%d unprocessed=%d speed=%d", entries, unprocessed(t, p), testdb.LoadRocket(t, p, "c").Speed)
+	}
+}
