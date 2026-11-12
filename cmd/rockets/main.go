@@ -7,10 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -36,6 +34,7 @@ type CLI struct {
 	Globals
 
 	Migrate MigrateCmd `cmd:"" help:"Bring the database schema to the latest version."`
+	Server  ServerCmd  `cmd:"" help:"Serve the HTTP API: accept messages into the inbox."`
 }
 
 // needsDatabase is implemented by modes that require DATABASE_URL.
@@ -91,23 +90,4 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) (code int
 		return exitError
 	}
 	return exitOK
-}
-
-func usageError(stderr io.Writer, parser *kong.Kong, kctx *kong.Context, err error) int {
-	_, _ = fmt.Fprintf(stderr, "rockets: error: %v\n\n", err)
-	var perr *kong.ParseError
-	if kctx == nil && errors.As(err, &perr) {
-		kctx = perr.Context
-	}
-	if kctx != nil {
-		parser.Stdout = stderr // usage after an error goes to stderr
-		_ = kctx.PrintUsage(true)
-	}
-	return exitUsage
-}
-
-func newLogger(w io.Writer, level string) *slog.Logger {
-	var l slog.Level
-	_ = l.UnmarshalText([]byte(strings.ToUpper(level)))
-	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: l}))
 }

@@ -30,5 +30,33 @@ services:
         condition: service_healthy
     restart: "no"
 
+  # Stateless API servers; nginx below is the only published entry point.
+  server:
+    build: .
+    image: rockets:dev
+    command: ["server"]
+    environment:
+      DATABASE_URL: postgres://rockets:rockets@postgres:5432/rockets?sslmode=disable
+    deploy:
+      replicas: 3
+    # Longer than the server's 15 s shutdown timeout; Docker's default is 10 s.
+    stop_grace_period: 20s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:1.29-alpine   # >= 1.27.3 for "resolve" in upstream
+    ports:
+      - "8088:8088"
+    volumes:
+      - ./deploy/nginx:/etc/nginx/conf.d:ro
+    depends_on:
+      - server
+    restart: unless-stopped
+
 volumes:
   pgdata:

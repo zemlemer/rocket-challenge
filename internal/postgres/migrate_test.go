@@ -6,7 +6,6 @@ import (
 	"sync"
 	"testing"
 	"testing/fstest"
-	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -25,62 +24,8 @@ var (
 	               this is not sql;`)
 )
 
-func newPool(t *testing.T, url string) *pgxpool.Pool {
-	t.Helper()
-	pool, err := postgres.Connect(context.Background(), url, 10*time.Second, quiet)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
-	return pool
-}
-
-func migrate(t *testing.T, pool *pgxpool.Pool, fsys fstest.MapFS) postgres.MigrateResult {
-	t.Helper()
-	res, err := postgres.Migrate(context.Background(), pool, fsys, quiet)
-	if err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
-	return res
-}
-
-func recorded(t *testing.T, pool *pgxpool.Pool) []int64 {
-	t.Helper()
-	rows, err := pool.Query(context.Background(), "select version from schema_migrations order by version")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rows.Close()
-	var vs []int64
-	for rows.Next() {
-		var v int64
-		if err := rows.Scan(&v); err != nil {
-			t.Fatal(err)
-		}
-		vs = append(vs, v)
-	}
-	return vs
-}
-
-func tableExists(t *testing.T, pool *pgxpool.Pool, name string) bool {
-	t.Helper()
-	var ok bool
-	if err := pool.QueryRow(context.Background(), "select to_regclass($1) is not null", name).Scan(&ok); err != nil {
-		t.Fatal(err)
-	}
-	return ok
-}
-
-func ids(ms []postgres.Migration) []string {
-	var out []string
-	for _, m := range ms {
-		out = append(out, m.ID())
-	}
-	return out
-}
-
 func TestMigrateEmptyDatabaseAppliesAllInOrder(t *testing.T) {
-	pool := newPool(t, testdb.New(t))
+	pool := testdb.Pool(t, testdb.New(t))
 	res := migrate(t, pool, fstest.MapFS{"0002_second.sql": m2, "0001_first.sql": m1, "README.md": file("docs")})
 
 	if got := strings.Join(ids(res.Applied), ","); got != "0001_first,0002_second" {
@@ -95,7 +40,7 @@ func TestMigrateEmptyDatabaseAppliesAllInOrder(t *testing.T) {
 }
 
 func TestMigrateNoMigrationsCreatesBookkeepingOnly(t *testing.T) {
-	pool := newPool(t, testdb.New(t))
+	pool := testdb.Pool(t, testdb.New(t))
 	res := migrate(t, pool, fstest.MapFS{"README.md": file("docs")})
 	if len(res.Applied) != 0 || res.Version != 0 {
 		t.Fatalf("res = %+v", res)
@@ -106,7 +51,7 @@ func TestMigrateNoMigrationsCreatesBookkeepingOnly(t *testing.T) {
 }
 
 func TestMigrateAppliesOnlyNewMigrationAndKeepsData(t *testing.T) {
-	pool := newPool(t, testdb.New(t))
+	pool := testdb.Pool(t, testdb.New(t))
 	migrate(t, pool, fstest.MapFS{"0001_first.sql": m1})
 	if _, err := pool.Exec(context.Background(), "insert into t1 values (1)"); err != nil {
 		t.Fatal(err)
@@ -123,7 +68,7 @@ func TestMigrateAppliesOnlyNewMigrationAndKeepsData(t *testing.T) {
 }
 
 func TestMigrateSecondRunAppliesNothing(t *testing.T) {
-	pool := newPool(t, testdb.New(t))
+	pool := testdb.Pool(t, testdb.New(t))
 	fsys := fstest.MapFS{"0001_first.sql": m1, "0002_second.sql": m2}
 	migrate(t, pool, fsys)
 	res := migrate(t, pool, fsys)
@@ -133,9 +78,9 @@ func TestMigrateSecondRunAppliesNothing(t *testing.T) {
 }
 
 func TestMigrateBrokenMigrationIsAtomic(t *testing.T) {
-	pool := newPool(t, testdb.New(t))
+	pool := testdb.Pool(t, testdb.New(t))
 	_, err := postgres.Migrate(context.Background(), pool,
-		fstest.MapFS{"0001_first.sql": m1, "0002_broken.sql": broken}, quiet)
+		fstest.MapFS{"0001_first.sql": m1, "0002_broken.sql": broken}, testdb.Logger())
 	if err == nil || !strings.Contains(err.Error(), "0002_broken") {
 		t.Fatalf("err = %v, want error naming 0002_broken", err)
 	}
@@ -171,7 +116,7 @@ func TestMigrateConcurrentRunsApplyOnce(t *testing.T) {
 	const runs = 3
 	pools := make([]*pgxpool.Pool, runs)
 	for i := range pools {
-		pools[i] = newPool(t, url) // separate pools = separate sessions, like separate processes
+		pools[i] = testdb.Pool(t, url) // separate pools = separate sessions, like separate processes
 	}
 
 	var wg sync.WaitGroup
@@ -183,7 +128,7 @@ func TestMigrateConcurrentRunsApplyOnce(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			res, err := postgres.Migrate(context.Background(), p, fsys, quiet)
+			res, err := postgres.Migrate(context.Background(), p, fsys, testdb.Logger())
 			errs <- err
 			applied <- len(res.Applied)
 		}()

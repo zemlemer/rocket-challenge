@@ -170,10 +170,3 @@ func applyOne(ctx context.Context, conn *pgx.Conn, m Migration) error {
 	}
 	return nil
 }
-
-func latestVersion(ms []Migration) int64 {
-	if len(ms) == 0 {
-		return 0
-	}
-	return ms[len(ms)-1].Version
-}

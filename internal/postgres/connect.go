@@ -4,34 +4,47 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// Pool defaults, applied unless the database URL sets the parameter.
 const (
-	backoffInitial = 100 * time.Millisecond
-	backoffMax     = 2 * time.Second
-	pingTimeout    = 2 * time.Second
+	DefaultConnectTimeout = 5 * time.Second // URL parameter connect_timeout
+	DefaultMaxConns       = 10              // URL parameter pool_max_conns
 )
 
-// Backoff returns the delay before retry number attempt (0-based):
-// 100ms doubling per attempt, capped at 2s.
-func Backoff(attempt int) time.Duration {
-	d := backoffInitial
-	for i := 0; i < attempt && d < backoffMax; i++ {
-		d *= 2
+var (
+	hasConnectTimeout = regexp.MustCompile(`(^|[?&\s])connect_timeout=`)
+	hasPoolMaxConns   = regexp.MustCompile(`(^|[?&\s])pool_max_conns=`)
+)
+
+// PoolConfig parses databaseURL and applies the pool defaults: a bounded
+// time to establish a connection and a bounded pool size. pgx's own defaults
+// are no connect timeout and a size that depends on the CPU count.
+func PoolConfig(databaseURL string) (*pgxpool.Config, error) {
+	cfg, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid database URL: %w", err)
 	}
-	return min(d, backoffMax)
+	if !hasConnectTimeout.MatchString(databaseURL) {
+		cfg.ConnConfig.ConnectTimeout = DefaultConnectTimeout
+	}
+	if !hasPoolMaxConns.MatchString(databaseURL) {
+		cfg.MaxConns = DefaultMaxConns
+	}
+	return cfg, nil
 }
 
 // Connect opens a connection pool and waits until the database answers,
 // retrying with Backoff for up to timeout. The returned pool must be closed
 // by the caller.
 func Connect(ctx context.Context, databaseURL string, timeout time.Duration, log *slog.Logger) (*pgxpool.Pool, error) {
-	cfg, err := pgxpool.ParseConfig(databaseURL)
+	cfg, err := PoolConfig(databaseURL)
 	if err != nil {
-		return nil, fmt.Errorf("invalid database URL: %w", err)
+		return nil, err
 	}
 	target := fmt.Sprintf("%s:%d/%s", cfg.ConnConfig.Host, cfg.ConnConfig.Port, cfg.ConnConfig.Database)
 

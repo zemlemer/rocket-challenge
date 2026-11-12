@@ -1,8 +1,6 @@
 package main_test
 
 import (
-	"bytes"
-	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,36 +24,6 @@ func TestMain(m *testing.M) {
 	code := m.Run()
 	_ = os.RemoveAll(dir)
 	os.Exit(code)
-}
-
-type result struct {
-	code           int
-	stdout, stderr string
-}
-
-// rockets runs the binary with a clean configuration environment plus env.
-func rockets(t *testing.T, env []string, args ...string) result {
-	t.Helper()
-	cmd := exec.Command(binary, args...)
-	for _, kv := range os.Environ() {
-		switch strings.SplitN(kv, "=", 2)[0] {
-		case "DATABASE_URL", "DB_CONNECT_TIMEOUT", "LOG_LEVEL":
-			continue
-		}
-		cmd.Env = append(cmd.Env, kv)
-	}
-	cmd.Env = append(cmd.Env, env...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	err := cmd.Run()
-	code := 0
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		code = exitErr.ExitCode()
-	} else if err != nil {
-		t.Fatalf("run rockets: %v", err)
-	}
-	return result{code, stdout.String(), stderr.String()}
 }
 
 func TestHelpListsModes(t *testing.T) {

@@ -2,10 +2,6 @@ package postgres_test
 
 import (
 	"context"
-	"io"
-	"log/slog"
-	"net"
-	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -13,8 +9,6 @@ import (
 	"rockets/internal/postgres"
 	"rockets/internal/testdb"
 )
-
-var quiet = slog.New(slog.NewTextHandler(io.Discard, nil))
 
 func TestBackoffSchedule(t *testing.T) {
 	want := []time.Duration{
@@ -33,7 +27,7 @@ func TestBackoffSchedule(t *testing.T) {
 
 func TestConnectGivesUpAfterTimeout(t *testing.T) {
 	start := time.Now()
-	_, err := postgres.Connect(context.Background(), "postgres://u:p@127.0.0.1:1/db", time.Second, quiet)
+	_, err := postgres.Connect(context.Background(), "postgres://u:p@127.0.0.1:1/db", time.Second, testdb.Logger())
 	if err == nil || !strings.Contains(err.Error(), "could not be reached within 1s") {
 		t.Fatalf("err = %v", err)
 	}
@@ -43,7 +37,7 @@ func TestConnectGivesUpAfterTimeout(t *testing.T) {
 }
 
 func TestConnectInvalidURL(t *testing.T) {
-	_, err := postgres.Connect(context.Background(), "postgres://u:p@host:notaport/db", time.Second, quiet)
+	_, err := postgres.Connect(context.Background(), "postgres://u:p@host:notaport/db", time.Second, testdb.Logger())
 	if err == nil || !strings.Contains(err.Error(), "invalid database URL") {
 		t.Fatalf("err = %v", err)
 	}
@@ -52,53 +46,16 @@ func TestConnectInvalidURL(t *testing.T) {
 // The database becomes reachable only after Connect has started retrying:
 // a TCP proxy to the real database starts listening 700ms later.
 func TestConnectWaitsForLateDatabase(t *testing.T) {
-	dbURL := testdb.New(t)
-	u, _ := url.Parse(dbURL)
-	upstream := u.Host
-
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	proxyAddr := l.Addr().String()
-	_ = l.Close() // nothing listens until the proxy starts
-
+	proxy, proxied := testdb.NewProxy(t, testdb.New(t))
+	proxy.Stop() // nothing listens until the proxy starts again
 	go func() {
 		time.Sleep(700 * time.Millisecond)
-		startProxy(t, proxyAddr, upstream)
+		proxy.Start()
 	}()
 
-	u.Host = proxyAddr
-	pool, err := postgres.Connect(context.Background(), u.String(), 10*time.Second, quiet)
+	pool, err := postgres.Connect(context.Background(), proxied, 10*time.Second, testdb.Logger())
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
 	pool.Close()
-}
-
-func startProxy(t *testing.T, addr, upstream string) {
-	l, err := net.Listen("tcp", addr)
-	if err != nil {
-		t.Errorf("proxy listen: %v", err)
-		return
-	}
-	t.Cleanup(func() { _ = l.Close() })
-	go func() {
-		for {
-			c, err := l.Accept()
-			if err != nil {
-				return
-			}
-			go func() {
-				defer func() { _ = c.Close() }()
-				up, err := net.Dial("tcp", upstream)
-				if err != nil {
-					return
-				}
-				defer func() { _ = up.Close() }()
-				go func() { _, _ = io.Copy(up, c) }()
-				_, _ = io.Copy(c, up)
-			}()
-		}
-	}()
 }
