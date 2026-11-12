@@ -1,0 +1,21 @@
+schema: spec-driven
+
+context: |
+  Rockets backend challenge; original task text is in docs/challenge.md.
+  Stack: Go (stdlib net/http), PostgreSQL for persistence.
+  Architecture: API server (POST /messages stores raw bodies in an inbox
+  table and answers only 202 or 5xx; GET /rockets reads state) and a
+  processor that consumes the inbox and updates rocket state.
+  Delivery: Dockerfile + docker compose (PostgreSQL, 3 servers, 2 processors,
+  nginx round-robin on host port 8088); the provided rockets simulator runs
+  from the host with default settings against http://localhost:8088/messages.
+  Durability over availability: never acknowledge an uncommitted message.
+  Correctness priorities (AGENTS.md): per-rocket ordering, idempotency,
+  concurrent request safety, reliable state transitions, clear errors.
+  Clean Architecture: HTTP, domain logic, persistence kept separate.
+
+rules:
+  design:
+    - Record meaningful trade-offs and distinguish verified behavior from assumptions
+  tasks:
+    - One logical task per item, each ending with the tests that verify it
