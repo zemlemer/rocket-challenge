@@ -14,17 +14,20 @@ import (
 	"rockets/pkg/helpers"
 )
 
-// readBounded reads up to limit bytes; truncated reports that more followed.
-// Any read error before the end of the body or the limit is returned.
+// readBounded reads the complete body and returns its bytes when it fits.
+// An oversized body is discarded and reported as truncated only after a successful read.
 func readBounded(r io.Reader, limit int) (body []byte, truncated bool, err error) {
 	body, err = io.ReadAll(io.LimitReader(r, int64(limit)+1))
 	if err != nil {
-		return body, false, err
+		return nil, false, err
 	}
-	if len(body) > limit {
-		return body[:limit], true, nil
+	if len(body) <= limit {
+		return body, false, nil
 	}
-	return body, false, nil
+	if _, err := io.Copy(io.Discard, r); err != nil {
+		return nil, false, err
+	}
+	return nil, true, nil
 }
 
 // rfc3339 accepts a JSON string holding an RFC 3339 timestamp with any number

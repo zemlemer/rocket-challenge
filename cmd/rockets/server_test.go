@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"rockets/internal/handler"
 	"rockets/internal/testdb"
 )
 
@@ -60,6 +61,76 @@ func TestClientDisconnectMidBodyStoresNothing(t *testing.T) {
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusAccepted || inboxCount(t, url) != 1 {
 		t.Fatalf("complete redelivery: status = %d, inbox = %d", resp.StatusCode, inboxCount(t, url))
+	}
+}
+
+func TestIncompleteOversizedBodyStoresNothing(t *testing.T) {
+	prefix := testMessage + strings.Repeat(" ", handler.MaxBodyBytes+1-len(testMessage))
+	body := prefix + strings.Repeat(" ", 2*handler.MaxBodyBytes-len(prefix))
+	for _, chunked := range []bool{false, true} {
+		framing := "content length"
+		if chunked {
+			framing = "chunked"
+		}
+		t.Run(framing, func(t *testing.T) {
+			url := migrated(t)
+			srv := startServer(t, url)
+			pool := testdb.Pool(t, url)
+
+			conn, err := net.DialTimeout("tcp", srv.addr, 5*time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = conn.Close() }()
+			if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			const header = "POST /messages HTTP/1.1\r\nHost: test\r\nConnection: close\r\n"
+			if chunked {
+				// A complete chunk without the final zero-length chunk is an incomplete body.
+				_, err = fmt.Fprintf(conn, header+"Transfer-Encoding: chunked\r\n\r\n%x\r\n%s\r\n", len(prefix), prefix)
+			} else {
+				_, err = fmt.Fprintf(conn, header+"Content-Length: %d\r\n\r\n%s", len(body), prefix)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := conn.(*net.TCPConn).CloseWrite(); err != nil {
+				t.Fatal(err)
+			}
+			resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = resp.Body.Close()
+			if resp.StatusCode != http.StatusInternalServerError {
+				t.Fatalf("incomplete body: status = %d, want 500", resp.StatusCode)
+			}
+			if entries := testdb.AllEntries(t, pool); len(entries) != 0 {
+				t.Fatalf("inbox holds %d entries after the interrupted upload", len(entries))
+			}
+
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "http://"+srv.addr+"/messages", strings.NewReader(body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if chunked {
+				req.ContentLength = -1
+			}
+			resp, err = (&http.Client{Timeout: 5 * time.Second}).Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = resp.Body.Close()
+			entries := testdb.AllEntries(t, pool)
+			if resp.StatusCode != http.StatusAccepted || len(entries) != 1 {
+				t.Fatalf("complete redelivery: status = %d, inbox entries = %d", resp.StatusCode, len(entries))
+			}
+			e := entries[0]
+			if !e.Truncated || len(e.Body) != 0 || e.Channel != nil || e.MessageNumber != nil || e.MessageType != nil || e.MessageTime != nil {
+				t.Fatalf("complete redelivery: truncated=%v len=%d channel=%v number=%v type=%v time=%v", e.Truncated, len(e.Body), e.Channel, e.MessageNumber, e.MessageType, e.MessageTime)
+			}
+		})
 	}
 }
 

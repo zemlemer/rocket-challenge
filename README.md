@@ -78,7 +78,7 @@ start on a database that is not fully migrated and shuts down gracefully on
 
 | Endpoint | Response |
 |---|---|
-| `POST /messages` | `202` once the request body is stored in the inbox; `503` if storage is unavailable, `500` on other failures. Never `4xx`: senders redeliver a message unchanged, so content is not validated here. |
+| `POST /messages` | `202` once the inbox entry is committed, `503` if storage is unavailable, and `500` on other failures. Senders redeliver unchanged after a failed request, so content validation happens in the processor. |
 | `GET /healthz` | liveness: `200 {"status":"ok"}` while the process serves HTTP; does not check the database |
 | `GET /rockets/{channel}` | `200` with one rocket (see [Reading rockets](#reading-rockets)); `404` when there is none |
 | `GET /rockets` | `200 {"rockets": [...]}`, sortable; `400` for invalid sort parameters |
@@ -87,12 +87,16 @@ start on a database that is not fully migrated and shuts down gracefully on
 Unknown paths get `404`, wrong methods `405`, both as `{"error": "..."}`.
 `HEAD` is accepted wherever `GET` is.
 
-Every body is stored as is; bodies over 1 MiB are stored truncated. The four
-`metadata` fields are parsed and stored in their own columns (`channel`,
-`message_number`, `message_time`, `message_type`); a malformed field is stored
-as `NULL` without rejecting the request, and the `message` payload is not
-parsed. A body whose identity (`channel`, `messageNumber`) is already in the
-inbox is not stored twice. Inspect the inbox:
+Intake stores complete bodies up to and including 1 MiB unchanged. A complete
+body over 1 MiB gets an inbox entry with `truncated = true`, zero body bytes
+and `NULL` metadata. The processor quarantines that entry. An interrupted body
+creates no inbox entry.
+
+For bodies within the limit, intake parses the four `metadata` fields into
+`channel`, `message_number`, `message_time` and `message_type`. Malformed fields
+are stored as `NULL`, and payload validation happens in the processor. A
+redelivery with an existing identity (`channel`, `messageNumber`) gets `202`
+without adding a second row. You can inspect the inbox with this command.
 
 ```sh
 docker compose exec postgres psql -U rockets -d rockets -c \

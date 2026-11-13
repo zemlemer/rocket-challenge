@@ -91,7 +91,8 @@ func TestClassifyRejects(t *testing.T) {
 		e      domain.InboxEntry
 		reason string
 	}{
-		"truncated":              {truncated, "body: truncated"},
+		"historical truncated":   {truncated, "body: exceeds the 1 MiB size limit"},
+		"oversized without body": {domain.InboxEntry{Truncated: true}, "body: exceeds the 1 MiB size limit"},
 		"no identity":            {noID, "metadata: channel and messageNumber required"},
 		"no time":                {noTime, "metadata.messageTime: required"},
 		"no type":                {noType, "metadata.messageType: required"},

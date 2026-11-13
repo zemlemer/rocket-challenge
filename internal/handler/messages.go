@@ -9,8 +9,7 @@ import (
 	"time"
 )
 
-// MaxBodyBytes is the largest body stored unmodified; longer bodies are
-// stored truncated to this size.
+// MaxBodyBytes is the largest body stored in the inbox.
 const MaxBodyBytes = 1 << 20
 
 // saveTimeout bounds a single inbox insert.
@@ -27,18 +26,19 @@ type Messages struct {
 func (h *Messages) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	body, truncated, err := readBounded(r.Body, MaxBodyBytes)
 	if err != nil {
-		// Never store a partial body: its identity would shadow the complete redelivery.
-		h.Log.Warn("request body could not be read completely; nothing stored", "error", err, "bytes_read", len(body))
+		h.Log.Warn("request body could not be read completely; nothing stored", "error", err)
 		helpers.WriteError(w, http.StatusInternalServerError, "request body could not be read completely")
 		return
 	}
 
 	entry := InboxEntry{Body: body, Truncated: truncated}
-	if !truncated { // a cut-off body is invalid JSON: it carries no metadata
+	if !truncated {
 		entry.Metadata = ExtractMetadata(body)
 	}
-	if entry.Identity == nil {
-		h.Log.Warn("storing entry without identity", "bytes", len(body), "truncated", truncated)
+	if truncated {
+		h.Log.Warn("storing entry for oversized request body", "limit_bytes", MaxBodyBytes)
+	} else if entry.Identity == nil {
+		h.Log.Warn("storing entry without identity", "bytes", len(body))
 	}
 
 	// Detach from the client: once the body is read, finishing the insert is

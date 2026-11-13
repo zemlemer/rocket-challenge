@@ -26,16 +26,20 @@ func TestPostThroughEntryPointIsStored(t *testing.T) {
 }
 
 // Spec deployment "No size limit at the entry point".
-func TestLargeBodyIsNotRejectedByEntryPoint(t *testing.T) {
-	marker := uniqueChannel(t)
-	body := marker + strings.Repeat("x", 2<<20)
+func TestLargeBodyThroughEntryPointRecordsSizeViolation(t *testing.T) {
+	lastID := queryInt(t, `select coalesce(max(id), 0) from inbox`)
+	prefix := message(uniqueChannel(t), 1)
+	body := prefix + strings.Repeat(" ", (2<<20)-len(prefix))
 	if code := post(t, body); code != http.StatusAccepted {
-		t.Fatalf("status = %d, want 202 (not 413)", code)
+		t.Fatalf("status = %d, want 202", code)
 	}
-	n := queryInt(t, `select count(*) from inbox
-		where truncated and length(body) = 1048576 and position($1::bytea in body) = 1`, []byte(marker))
+	if n := queryInt(t, `select count(*) from inbox where id > $1`, lastID); n != 1 {
+		t.Fatalf("new inbox entries = %d, want 1", n)
+	}
+	n := queryInt(t, `select count(*) from inbox where id > $1 and truncated and length(body) = 0
+		and channel is null and message_number is null and message_time is null and message_type is null`, lastID)
 	if n != 1 {
-		t.Fatalf("truncated 1 MiB entry not found (found %d)", n)
+		t.Fatal("expected the new inbox entry to hold only the size flag and receipt information")
 	}
 }
 
