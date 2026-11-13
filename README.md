@@ -30,7 +30,7 @@ curl localhost:8088/healthz
 
 | Service | What it does |
 |---|---|
-| `postgres` | PostgreSQL 16 on a named volume, host port `15432` |
+| `postgres` | PostgreSQL 16 on a named volume, host port `15432`, restarts automatically unless stopped |
 | `migrate` | one-shot `rockets migrate`, runs after PostgreSQL is healthy |
 | `server` ×3 | `rockets server`, start after PostgreSQL is healthy and `migrate` succeeded, no published ports |
 | `processor` ×4 | `rockets processor`, start after PostgreSQL is healthy and `migrate` succeeded, no ports |

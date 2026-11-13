@@ -16,6 +16,10 @@ services:
       interval: 2s
       timeout: 3s
       retries: 30
+    # Like the other long-running services: depends_on only orders `compose up`,
+    # so without this a crash or a Docker restart would leave the stack without
+    # its database.
+    restart: unless-stopped
 
   # One-shot schema migration. Services that need the schema declare:
   #   depends_on: { migrate: { condition: service_completed_successfully } }
