@@ -150,3 +150,12 @@ The simulator test logs the achieved rate (about 4,000 messages/s on a laptop
 with Docker Desktop). Set `E2E_MIN_RATE` (messages/s) to fail the test below a
 threshold; when it fails, `request_time` in `docker compose logs nginx` shows
 whether the servers or the client were slow.
+
+For a longer simulator run, set the message count (the default is 100,000):
+
+```sh
+E2E_SIMULATOR_MAX_MESSAGES=200000 make test-e2e
+```
+
+Both simulator E2E tests use this count. The default run remains unchanged when
+the variable is unset.

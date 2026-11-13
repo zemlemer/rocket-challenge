@@ -147,10 +147,10 @@ type simulation struct {
 	drained time.Duration // after the run, until nothing was unprocessed
 }
 
-// simulate empties inbox and rockets, runs the simulator with its default
-// options while sampling the oldest unprocessed entry every 100 ms, calls
-// during (if any) a few seconds into the run, and waits until everything is
-// processed.
+// simulate empties inbox and rockets, runs the simulator (with its default
+// options unless E2E_SIMULATOR_MAX_MESSAGES is set), samples the oldest
+// unprocessed entry every 100 ms, calls during (if any) a few seconds into
+// the run, and waits until everything is processed.
 func simulate(t *testing.T, during func()) simulation {
 	t.Helper()
 	sim := os.Getenv("ROCKETS_SIMULATOR")
@@ -186,9 +186,25 @@ func simulate(t *testing.T, during func()) simulation {
 		go func() { time.Sleep(5 * time.Second); during() }()
 	}
 
+	args := []string{"launch", baseURL + "/messages"}
+	if maxMessages := os.Getenv("E2E_SIMULATOR_MAX_MESSAGES"); maxMessages != "" {
+		count, err := strconv.ParseUint(maxMessages, 10, 64)
+		if err != nil {
+			t.Fatalf("invalid E2E_SIMULATOR_MAX_MESSAGES %q: %v", maxMessages, err)
+		}
+		if count == 0 {
+			t.Fatal("E2E_SIMULATOR_MAX_MESSAGES must be positive")
+		}
+		args = append(args, "--max-messages="+maxMessages)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Minute)
+	defer cancel()
 	start := time.Now()
-	out, err := exec.Command(sim, "launch", baseURL+"/messages").CombinedOutput()
+	out, err := exec.CommandContext(ctx, sim, args...).CombinedOutput()
 	res.elapsed = time.Since(start)
+	if ctx.Err() == context.DeadlineExceeded {
+		t.Fatalf("simulator did not finish within 3 minutes; it may have exhausted all active rockets")
+	}
 	if err != nil {
 		t.Fatalf("simulator: %v\n%s", err, tail(string(out), 20))
 	}
