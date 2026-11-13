@@ -139,6 +139,69 @@ func TestCrashedReplicaIsRestarted(t *testing.T) {
 	}
 }
 
+// Spec deployment "Database crash": a PostgreSQL server that exits abnormally
+// is restarted by its restart policy, and the stack answers again without any
+// manual command. The crash is `pg_ctl stop -m immediate` (no shutdown
+// checkpoint, the postmaster exits); `docker kill` or `docker stop` would count
+// as an explicit stop, which `unless-stopped` does not restart.
+func TestDatabaseCrashIsRecovered(t *testing.T) {
+	pg := containers(t, "postgres")[0]
+	inspect := func(format string) string {
+		return strings.TrimSpace(run(t, "docker", "inspect", "-f", format, pg))
+	}
+	if policy := inspect("{{.HostConfig.RestartPolicy.Name}}"); policy != "unless-stopped" {
+		t.Fatalf("%s restart policy = %q, want unless-stopped", pg, policy)
+	}
+	// Leave a usable database for the tests that follow, whatever happens here.
+	t.Cleanup(func() {
+		if inspect("{{.State.Health.Status}}") != "healthy" {
+			compose(t, "up", "-d", "--wait", "postgres")
+		}
+	})
+	before, _ := strconv.Atoi(inspect("{{.RestartCount}}"))
+
+	// The exec session dies with the container, so its exit status is not
+	// meaningful; the restart count below is what shows the crash happened.
+	_ = exec.Command("docker", "exec", "-u", "postgres", pg,
+		"pg_ctl", "stop", "-m", "immediate", "-D", "/var/lib/postgresql/data").Run()
+
+	deadline := time.Now().Add(60 * time.Second)
+	waitFor := func(what string, ok func() bool) {
+		t.Helper()
+		for !ok() {
+			if time.Now().After(deadline) {
+				t.Fatalf("%s: not %s within 60 s (status %s, health %s)", pg, what,
+					inspect("{{.State.Status}}"), inspect("{{.State.Health.Status}}"))
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+	}
+	waitFor("restarted", func() bool {
+		n, _ := strconv.Atoi(inspect("{{.RestartCount}}"))
+		return n > before
+	})
+	waitFor("healthy again", func() bool { return inspect("{{.State.Health.Status}}") == "healthy" })
+
+	// Servers reconnect on their own: reads and intake work again through nginx.
+	waitFor("serving GET /stats with 200", func() bool {
+		resp, err := http.Get(baseURL + "/stats")
+		if err != nil {
+			return false
+		}
+		_ = resp.Body.Close()
+		return resp.StatusCode == http.StatusOK
+	})
+	channel := uniqueChannel(t)
+	for n := 1; n <= 6; n++ { // round-robin reaches every replica twice
+		if code := post(t, message(channel, n)); code != http.StatusAccepted {
+			t.Fatalf("POST %d after the database recovered = %d, want 202", n, code)
+		}
+	}
+	if n := queryInt(t, `select count(*) from inbox where channel = $1`, channel); n != 6 {
+		t.Fatalf("inbox holds %d messages after the recovery, want 6", n)
+	}
+}
+
 // simulation is what one default simulator run against the stack measured.
 type simulation struct {
 	sent    int
