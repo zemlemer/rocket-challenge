@@ -45,7 +45,7 @@ Both endpoints use the same rocket representation:
 | `lastMessageNumber` | `last_applied_message_number` | highest applied number, not a guarantee that all lower ones were applied |
 | `lastMessageAt` | `last_applied_message_at` | message time of that message |
 
-Times are RFC 3339 in UTC: PostgreSQL `timestamptz` keeps the instant but not the sender's offset, and only to the microsecond, so a nanosecond fraction from the sender comes back rounded. They are the sender's message times: intake and processing accept any RFC 3339 value, so they may lie in the future, and `lastMessageAt` may be earlier than `launchedAt`. `mission_message_number` and `updated_at` are processing internals and are not exposed.
+Times are RFC 3339 in UTC: PostgreSQL `timestamptz` keeps the instant but not the sender's offset, and only to the microsecond. Verified on the compose stack: intake passes `time.Time` to pgx, whose binary encoding truncates to microseconds (`.123456789` is stored as `.123456`; PostgreSQL itself would round a text value to `.123457`), so a nanosecond fraction from the sender comes back truncated. `jsonTime` also truncates, so values that bypass the database behave the same. They are the sender's message times: intake and processing accept any RFC 3339 value, so they may lie in the future, and `lastMessageAt` may be earlier than `launchedAt`. `mission_message_number` and `updated_at` are processing internals and are not exposed.
 
 Times are formatted with `time.Format(time.RFC3339Nano)` on the UTC value, not with `time.Time.MarshalJSON`. Verified with Go 1.27: a message time such as `9999-12-31T23:30:00-01:00` is valid RFC 3339 but falls in year 10000 in UTC, and `MarshalJSON` then fails with `year outside of range [0,9999]`. One such rocket, which any sender can create, would turn every `GET /rockets` into `500`. `Format` writes `10000-01-01T00:30:00Z` (and `-0001-…` for negative years) instead; those values are outside strict RFC 3339 but keep the response intact.
 
@@ -55,7 +55,7 @@ The list is wrapped as `{"rockets": [...]}` so that a later pagination change ca
 
 ### D4. Full list now; pagination later if needed
 
-`GET /rockets` returns every visible rocket in one response. The challenge asks for all rockets, and a default simulator run is assumed to use a few dozen channels (assumption; the E2E run in tasks records the actual count). Pagination would add client navigation, page-boundary and concurrent-update semantics without a present scale need. If the number of rockets grows enough to make full-list reads expensive, add pagination in a separate change with its own API contract and tests.
+`GET /rockets` returns every visible rocket in one response. The challenge asks for all rockets, and a default simulator run produced 20 rockets (verified by the simulator E2E test). Pagination would add client navigation, page-boundary and concurrent-update semantics without a present scale need. If the number of rockets grows enough to make full-list reads expensive, add pagination in a separate change with its own API contract and tests.
 
 No index is added: `channel` is the primary key for single reads, and sorting a list of this size in memory is cheap.
 
@@ -77,7 +77,7 @@ Cost: the list query also reads the hidden historical rows, which are few and no
 ### D6. Errors
 
 - Unknown, neither launched nor exploded, or invalid-format channel: `404 {"error": "rocket not found"}`. The client cannot act on the difference, and the answer does not reveal whether a hidden row exists.
-- Invalid `sort` or `order`, or a malformed query string: `400` naming the parameter and the accepted values. Unlike `POST /messages`, a query is the client's own request and can be corrected.
+- Invalid `sort` or `order`: `400` naming the parameter and the accepted values. A query string `url.ParseQuery` cannot parse gets `400` with its error: verified with Go 1.27, this covers a bad `%` escape and `;` used as a separator (`invalid semicolon separator in query`), so the message names the real cause. Unlike `POST /messages`, a query is the client's own request and can be corrected.
 - Database unavailable: `503`, other failures `500`, as in message intake. Each read runs under a 5 s context deadline; an expired deadline also gets `503`, so a stuck database does not hold requests until the 30 s write timeout.
 - A client that disconnects cancels the request context and the query. That is logged at debug level, not as an error, and no response is attempted.
 - Wrong method and unknown paths keep the existing `405`/`404` behavior of the server.
@@ -92,6 +92,12 @@ Routes use the standard `ServeMux` patterns `GET /rockets` and `GET /rockets/{ch
 
 The channel rule (ASCII letters, digits, `-`, `_`) is enough to make the path unambiguous: no valid channel needs percent-encoding or can be `.`/`..`, so each rocket has one canonical URL, and anything else decodes to a channel outside the rule. Percent-encoding an allowed character (`/rockets/c%31`) decodes to `c1` and reaches the same rocket; RFC 3986 treats these forms as equivalent, so this is harmless.
 
+### D8. No nginx retry of read `503`
+
+The `location /` block retries `error timeout http_502 http_503` on another replica, which suits intake: a replica that cannot store a message is worth bypassing. For reads a `503` comes from the shared database (unavailable or slower than the 5 s read timeout), so another replica cannot do better. A separate `location /rockets` keeps the same proxy settings but retries only `error timeout http_502`.
+
+Verified on the compose stack with PostgreSQL paused: with `http_503` in the read location, `GET /rockets` answered `503` after 15.0 s (three attempts); without it, after one 5 s attempt. In both cases `POST /messages` got `202` on every replica right after the database was unpaused, so the retry did not take replicas out of rotation; the gain is latency and database load, not intake availability.
+
 ## Risks / Trade-offs
 
 - [Full-list size grows with rocket count, and any sender can create a rocket by posting a launch on a new channel] → Keep the initial contract simple; measure list size and latency before proposing pagination. The list is unbounded; recorded as a limitation.
@@ -102,7 +108,7 @@ The channel rule (ASCII letters, digits, `-`, `_`) is enough to make the path un
 - [Sorting ties could be unstable] → Use channel as a deterministic secondary key.
 - [`speed` can exceed 2^53 after millions of increases of up to 10^9; JSON stays exact, but a JavaScript client loses precision] → Recorded as a limitation; not changed in this change.
 - [Times come from the sender's clock, so sorting by `launchedAt` follows those clocks] → Documented; not corrected.
-- [nginx retries `503` on the next replica (`proxy_next_upstream ... http_503`, `max_fails=1`), so while the database is down one GET is tried on every server, and each is marked down for 5 s] → Same behavior as `POST /messages` today; accepted and documented.
+- [The general nginx location retries `503` on the next replica, so a read hitting a slow database would wait for each replica's 5 s timeout and repeat the query] → D8: a separate `location /rockets` does not retry `503`.
 - [Hidden historical rows are read from the database on every list request] → They are few and cannot grow any more (D5).
 
 ## Migration Plan

@@ -111,7 +111,7 @@ For an exploded rocket whose launch is not processed yet, `type`, `launchSpeed` 
 - **THEN** the rocket is returned with `mission` `MARS` and `type` `null`
 
 ### Requirement: Time fields
-`launchedAt` and `lastMessageAt` SHALL be the message times sent by the rocket, not processing times, and SHALL NOT be checked against the clock or each other. They SHALL be written in RFC 3339 in UTC with microsecond precision and no trailing zeros in the fraction. A time whose UTC year is outside 0000–9999 SHALL be written with all digits of its year and a leading `-` when negative, and SHALL NOT make a response fail.
+`launchedAt` and `lastMessageAt` SHALL be the message times sent by the rocket, not processing times, and SHALL NOT be checked against the clock or each other. They SHALL be written in RFC 3339 in UTC with the fraction truncated to microseconds, as stored, and no trailing zeros in the fraction. A time whose UTC year is outside 0000–9999 SHALL be written with all digits of its year and a leading `-` when negative, and SHALL NOT make a response fail.
 
 #### Scenario: Message time in UTC
 - **WHEN** the launch of `c1` had message time `2022-02-02T19:39:05.86337+01:00`
@@ -119,7 +119,7 @@ For an exploded rocket whose launch is not processed yet, `type`, `launchSpeed` 
 
 #### Scenario: Nanoseconds sent
 - **WHEN** the launch had message time `2022-02-02T19:39:05.123456789+01:00`
-- **THEN** `launchedAt` is `2022-02-02T18:39:05.123457Z`
+- **THEN** `launchedAt` is `2022-02-02T18:39:05.123456Z`
 
 #### Scenario: Year beyond 9999 in UTC
 - **WHEN** a visible rocket's launch had message time `9999-12-31T23:30:00-01:00`
@@ -160,7 +160,7 @@ For an exploded rocket whose launch is not processed yet, `type`, `launchSpeed` 
 - **THEN** `b` is returned before `a`
 
 ### Requirement: Invalid query parameters
-`GET /rockets` SHALL respond `400` with an `error` naming the parameter and its accepted values when `sort` or `order` has an unknown value (values are case-sensitive), is empty, or is given more than once, and `400` when the query string is not validly percent-encoded. Other query parameters SHALL be ignored.
+`GET /rockets` SHALL respond `400` with an `error` naming the parameter and its accepted values when `sort` or `order` has an unknown value (values are case-sensitive), is empty, or is given more than once, and `400` with an `error` naming the cause when the query string cannot be parsed (invalid percent-encoding, or `;` used as a separator). Other query parameters SHALL be ignored.
 
 #### Scenario: Unknown sort field
 - **WHEN** a client sends `GET /rockets?sort=altitude`
@@ -177,6 +177,10 @@ For an exploded rocket whose launch is not processed yet, `type`, `launchSpeed` 
 #### Scenario: Malformed query string
 - **WHEN** a client sends `GET /rockets?sort=%zz&order=desc`
 - **THEN** the server responds `400` instead of silently dropping `sort`
+
+#### Scenario: Semicolon separator
+- **WHEN** a client sends `GET /rockets?sort=speed;order=desc`
+- **THEN** the server responds `400` with an `error` naming the semicolon separator
 
 #### Scenario: Unrelated parameter
 - **WHEN** a client sends `GET /rockets?page=2`

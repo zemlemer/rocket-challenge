@@ -53,8 +53,11 @@ start on a database that is not fully migrated and shuts down gracefully on
 |---|---|
 | `POST /messages` | `202` once the request body is stored in the inbox; `503` if storage is unavailable, `500` on other failures. Never `4xx`: senders redeliver a message unchanged, so content is not validated here. |
 | `GET /healthz` | liveness: `200 {"status":"ok"}` while the process serves HTTP; does not check the database |
+| `GET /rockets/{channel}` | `200` with one rocket (see [Reading rockets](#reading-rockets)); `404` when there is none |
+| `GET /rockets` | `200 {"rockets": [...]}`, sortable; `400` for invalid sort parameters |
 
 Unknown paths get `404`, wrong methods `405`, both as `{"error": "..."}`.
+`HEAD` is accepted wherever `GET` is.
 
 Every body is stored as is; bodies over 1 MiB are stored truncated. The four
 `metadata` fields are parsed and stored in their own columns (`channel`,
@@ -100,8 +103,8 @@ A channel may contain only ASCII letters, digits, `-`, and `_` (1–255 bytes).
 The processor quarantines messages with other channel characters, naming
 `metadata.channel` in the reason; they never change rocket state. Intake still
 stores and answers them with `202`, including duplicate deliveries. Rocket rows
-created before this rule may remain in the database; the future read API must
-hide those historical rows. Quarantined entries are not replayed automatically.
+created before this rule may remain in the database; the read API hides them
+and leaves them stored. Quarantined entries are not replayed automatically.
 
 Inspect processing:
 
@@ -113,6 +116,78 @@ docker compose exec postgres psql -U rockets -d rockets -c \
 docker compose exec postgres psql -U rockets -d rockets -c \
   "select channel, rocket_type, speed, mission, explosion_reason, last_applied_message_number from rockets order by channel"
 ```
+
+## Reading rockets
+
+The server reads the state the processors have stored:
+
+```sh
+curl -s localhost:8088/rockets
+curl -s 'localhost:8088/rockets?sort=speed&order=desc'
+curl -s localhost:8088/rockets/193270a9-c9cf-404a-8f83-838e71d9ae67
+```
+
+```json
+{
+  "channel": "193270a9-c9cf-404a-8f83-838e71d9ae67",
+  "type": "Falcon-9",
+  "status": "active",
+  "speed": 3500,
+  "launchSpeed": 500,
+  "mission": "ARTEMIS",
+  "launchedAt": "2022-02-02T18:39:05.86337Z",
+  "explosionReason": null,
+  "lastMessageNumber": 12,
+  "lastMessageAt": "2022-02-02T18:41:10.12345Z"
+}
+```
+
+`GET /rockets` returns `{"rockets": [...]}` with every visible rocket in this
+form, without pagination.
+
+**Which rockets are visible.** A rocket appears once its launch or its
+explosion has been processed. A rocket with only speed or mission changes so
+far is `404` and not listed. An exploded rocket whose launch has not been
+processed yet is shown with `type`, `launchSpeed`, `launchedAt` (and `mission`,
+unless a mission change arrived) as `null`, and with a `speed` that holds the
+increments without the launch speed; when the launch arrives, those fields fill
+in and `speed` grows by the launch speed. Rockets whose channel breaks the
+channel rule are hidden (`404`), and channels are matched exactly, case
+included.
+
+**Fields.** `status` is `active` or `exploded`. `lastMessageNumber` and
+`lastMessageAt` belong to the highest-numbered applied message; lower numbers
+may still be missing. Times are the senders' message times, not processing
+times, in UTC, truncated to microseconds; a time whose UTC year falls outside
+0000–9999 is written with all digits of its year (`10000-01-01T00:30:00Z`).
+
+**Sorting.** `sort` is one of `channel` (default), `type`, `mission`, `speed`,
+`status`, `launchedAt`; `order` is `asc` (default) or `desc`. Values are
+case-sensitive. Text compares byte-wise (`Z` before `a`), `active` sorts before
+`exploded`, `null` values come last in either direction, and ties are ordered
+by ascending `channel`. An unknown, empty or repeated `sort`/`order`, or a
+malformed query string, gets `400`; other parameters are ignored.
+
+**Errors.** `404 {"error": "rocket not found"}` for an unknown or hidden
+rocket; `503` when the database is unavailable or does not answer within 5 s;
+`500` on other failures. nginx does not retry a read's `503` on another server
+(only connection failures), so a client waits for one 5 s timeout, not three.
+A query string that cannot be parsed (a bad `%` escape, or `;` as a
+separator) gets `400` naming the cause.
+
+**Consistency.** Reads show committed processing results: a `202` from
+`POST /messages` does not mean the next read includes that message, which
+appears once a processor has applied it. Each
+response comes from one database snapshot, reads never block processing, and
+they keep working while processors are stopped.
+
+**Limitations.**
+- The list is unbounded: any sender can add rockets by posting launches or
+  explosions on new channels.
+- `speed` is exact in JSON, but values beyond 2^53 lose precision in
+  JavaScript clients.
+- No CORS or caching headers: a browser dashboard on another origin needs a
+  proxy.
 
 ## Database migrations
 

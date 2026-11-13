@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"time"
 
@@ -47,9 +48,12 @@ func (c *ServerCmd) Run(ctx context.Context, g *Globals, log *slog.Logger) error
 	}
 
 	inbox := repository.NewInbox(pool)
+	rockets := &handler.Rockets{Repo: repository.NewRockets(pool), Log: log}
 	routes := server.Routes(server.Handlers{
 		Messages: &handler.Messages{Repo: inbox, Log: log},
 		Health:   handler.Health{},
+		Rockets:  http.HandlerFunc(rockets.List),
+		Rocket:   http.HandlerFunc(rockets.Get),
 	})
 	return server.Run(ctx, l, routes, c.ShutdownTimeout, log)
 }
