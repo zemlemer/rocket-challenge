@@ -96,6 +96,13 @@ How a rocket's state is computed, independently of arrival order:
 
 `by` and `launchSpeed` must be integers from 0 to 1,000,000,000.
 
+A channel may contain only ASCII letters, digits, `-`, and `_` (1–255 bytes).
+The processor quarantines messages with other channel characters, naming
+`metadata.channel` in the reason; they never change rocket state. Intake still
+stores and answers them with `202`, including duplicate deliveries. Rocket rows
+created before this rule may remain in the database; the future read API must
+hide those historical rows. Quarantined entries are not replayed automatically.
+
 Inspect processing:
 
 ```sh

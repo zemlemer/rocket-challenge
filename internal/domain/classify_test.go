@@ -35,6 +35,42 @@ func TestClassifyConforming(t *testing.T) {
 	}
 }
 
+func TestClassifyChannelAlphabet(t *testing.T) {
+	for _, tc := range []struct {
+		name, channel string
+		valid         bool
+	}{
+		{"mixed ASCII", "Rocket_7-Az09", true},
+		{"hyphens only", "---", true},
+		{"underscores only", "___", true},
+		{"255 bytes", strings.Repeat("A", 255), true},
+		{"empty", "", false},
+		{"256 bytes", strings.Repeat("A", 256), false},
+		{"slash", "a/b", false},
+		{"dot", "a.b", false},
+		{"percent", "a%b", false},
+		{"question mark", "a?b", false},
+		{"fragment mark", "a#b", false},
+		{"space", "a b", false},
+		{"Unicode", "aé", false},
+		{"mixed invalid", "A_7/b", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := domain.Classify(entry(1, tc.channel, 1, domain.TypeLaunched,
+				`{"type":"A","launchSpeed":1,"mission":"M"}`))
+			if tc.valid && err != nil {
+				t.Fatalf("valid channel %q rejected: %v", tc.channel, err)
+			}
+			if !tc.valid {
+				var rej *domain.Rejection
+				if !errors.As(err, &rej) || !strings.Contains(rej.Reason, "metadata.channel") {
+					t.Fatalf("invalid channel %q: got %v, want channel rejection", tc.channel, err)
+				}
+			}
+		})
+	}
+}
+
 func TestClassifyRejects(t *testing.T) {
 	inc := func(payload string) domain.InboxEntry { return entry(1, "c", 2, domain.TypeSpeedIncreased, payload) }
 	noTime := entry(1, "c", 2, domain.TypeSpeedIncreased, `{"by":1}`)

@@ -205,3 +205,64 @@ func TestRedeliveryOfProcessedMessageIsDroppedAtIntake(t *testing.T) {
 		t.Fatalf("entries=%d unprocessed=%d speed=%d", entries, unprocessed(t, p), testdb.LoadRocket(t, p, "c").Speed)
 	}
 }
+
+func TestInvalidChannelIsQuarantinedAfterIntake(t *testing.T) {
+	_, p := testdb.Migrated(t)
+	ctx := context.Background()
+	intake := &handler.Messages{Repo: repository.NewInbox(p), Log: testdb.Logger()}
+	post := func(body string) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		intake.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/messages", strings.NewReader(body)))
+		if rec.Code != http.StatusAccepted {
+			t.Fatalf("POST status = %d, want 202", rec.Code)
+		}
+	}
+	const invalid = `{"metadata":{"channel":"bad/channel","messageNumber":1,"messageTime":"2022-02-02T19:39:05Z","messageType":"RocketLaunched"},"message":{"type":"A","launchSpeed":500,"mission":"M"}}`
+	const validChannel = "193270a9-c9cf-404a-8f83-838e71d9ae67"
+	const speedBeforeLaunch = `{"metadata":{"channel":"` + validChannel + `","messageNumber":2,"messageTime":"2022-02-02T19:39:06Z","messageType":"RocketSpeedIncreased"},"message":{"by":300}}`
+	const launch = `{"metadata":{"channel":"` + validChannel + `","messageNumber":1,"messageTime":"2022-02-02T19:39:05Z","messageType":"RocketLaunched"},"message":{"type":"A","launchSpeed":500,"mission":"M"}}`
+
+	post(invalid)
+	post(invalid)
+	post(speedBeforeLaunch)
+	post(launch)
+	var invalidEntries int
+	if err := p.QueryRow(ctx, `select count(*) from inbox where channel = 'bad/channel'`).Scan(&invalidEntries); err != nil {
+		t.Fatal(err)
+	}
+	if invalidEntries != 1 {
+		t.Fatalf("invalid channel entries = %d, want 1", invalidEntries)
+	}
+
+	repo := repository.NewProcessing(p, testdb.Logger())
+	if n, err := repo.ProcessBatch(ctx, 10, domain.Fold); err != nil || n != 3 {
+		t.Fatalf("processed n=%d err=%v, want 3 entries", n, err)
+	}
+	var outcome, reason string
+	if err := p.QueryRow(ctx, `select outcome, reason from inbox where channel = 'bad/channel'`).Scan(&outcome, &reason); err != nil {
+		t.Fatal(err)
+	}
+	if outcome != "quarantined" || !strings.Contains(reason, "metadata.channel") {
+		t.Fatalf("invalid channel outcome=%q reason=%q", outcome, reason)
+	}
+	post(invalid) // redelivery after quarantine must not create a pending copy
+	var entriesAfter, quarantinedAfter int
+	if err := p.QueryRow(ctx, `select count(*), count(*) filter (where outcome = 'quarantined') from inbox where channel = 'bad/channel'`).Scan(&entriesAfter, &quarantinedAfter); err != nil {
+		t.Fatal(err)
+	}
+	if entriesAfter != 1 || quarantinedAfter != 1 || unprocessed(t, p) != 0 {
+		t.Fatalf("after quarantined redelivery: entries=%d quarantined=%d unprocessed=%d", entriesAfter, quarantinedAfter, unprocessed(t, p))
+	}
+	var invalidRockets int
+	if err := p.QueryRow(ctx, `select count(*) from rockets where channel = 'bad/channel'`).Scan(&invalidRockets); err != nil {
+		t.Fatal(err)
+	}
+	if invalidRockets != 0 {
+		t.Fatalf("invalid channel created %d rockets", invalidRockets)
+	}
+	got := testdb.LoadRocket(t, p, validChannel)
+	if got.Speed != 800 || got.RocketType == nil || *got.RocketType != "A" {
+		t.Fatalf("valid out-of-order rocket = %+v, want launched at speed 800", got)
+	}
+}
