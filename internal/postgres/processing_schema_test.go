@@ -5,6 +5,7 @@ import (
 	"testing"
 	"testing/fstest"
 
+	"rockets/data"
 	"rockets/internal/postgres"
 	"rockets/internal/testdb"
 )
@@ -14,7 +15,7 @@ func TestProcessingMigrationKeepsInboxEntries(t *testing.T) {
 	ctx := context.Background()
 	pool := testdb.Pool(t, testdb.New(t))
 	only1 := fstest.MapFS{}
-	all := postgres.Migrations()
+	all := data.Migrations()
 	b, err := fsReadFile(all, "0001_inbox.sql")
 	if err != nil {
 		t.Fatal(err)

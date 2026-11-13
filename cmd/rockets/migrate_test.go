@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"rockets/data"
 	"rockets/internal/postgres"
 	"rockets/internal/testdb"
 )
@@ -18,7 +19,7 @@ func TestMigrateModeAppliesThenReportsUpToDate(t *testing.T) {
 	if first.code != 0 {
 		t.Fatalf("first run: exit status = %d; stderr:\n%s", first.code, first.stderr)
 	}
-	latest, err := postgres.LatestVersion(postgres.Migrations())
+	latest, err := postgres.LatestVersion(data.Migrations())
 	if err != nil {
 		t.Fatal(err)
 	}

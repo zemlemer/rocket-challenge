@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"rockets/data"
 	"rockets/internal/postgres"
 )
 
@@ -32,7 +33,7 @@ func Migrated(t testing.TB) (string, *pgxpool.Pool) {
 	t.Helper()
 	url := New(t)
 	p := Pool(t, url)
-	if _, err := postgres.Migrate(context.Background(), p, postgres.Migrations(), Logger()); err != nil {
+	if _, err := postgres.Migrate(context.Background(), p, data.Migrations(), Logger()); err != nil {
 		t.Fatalf("testdb: migrate: %v", err)
 	}
 	return url, p
