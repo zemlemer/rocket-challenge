@@ -110,7 +110,7 @@ func assertMatchesReference(t *testing.T, p *pgxpool.Pool) {
 	}
 }
 
-// serverRoutes wires intake and the read endpoints over pool, as
+// serverRoutes wires intake, the read endpoints and stats over pool, as
 // `rockets server` does.
 func serverRoutes(p *pgxpool.Pool) http.Handler {
 	log := testdb.Logger()
@@ -120,6 +120,7 @@ func serverRoutes(p *pgxpool.Pool) http.Handler {
 		Health:   handler.Health{},
 		Rockets:  http.HandlerFunc(rockets.List),
 		Rocket:   http.HandlerFunc(rockets.Get),
+		Stats:    &handler.Stats{Repo: repository.NewStats(p), Log: log},
 	})
 }
 

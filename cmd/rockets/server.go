@@ -54,6 +54,7 @@ func (c *ServerCmd) Run(ctx context.Context, g *Globals, log *slog.Logger) error
 		Health:   handler.Health{},
 		Rockets:  http.HandlerFunc(rockets.List),
 		Rocket:   http.HandlerFunc(rockets.Get),
+		Stats:    &handler.Stats{Repo: repository.NewStats(pool), Log: log},
 	})
 	return server.Run(ctx, l, routes, c.ShutdownTimeout, log)
 }

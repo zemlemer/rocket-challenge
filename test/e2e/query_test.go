@@ -112,14 +112,16 @@ func TestReadsWhileProcessorsStopped(t *testing.T) {
 	}
 }
 
-// Spec deployment "Read failures are not retried": a read that gets 503 from a
-// slow database is answered after one attempt, and intake works as soon as
-// the database answers again.
+// Spec deployment "Read failures are not retried": a read (/rockets, /stats)
+// that gets 503 from a slow database is answered after one attempt, and
+// intake works as soon as the database answers again.
 func TestSlowReadIsNotRetried(t *testing.T) {
 	loaded := stripComments(compose(t, "exec", "-T", "nginx", "nginx", "-T"))
-	reads := block(t, loaded, "location /rockets {")
-	if strings.Contains(reads, "http_503") || !strings.Contains(reads, "proxy_next_upstream error timeout http_502;") {
-		t.Fatalf("location /rockets must not retry 503:\n%s", reads)
+	for _, loc := range []string{"location /rockets {", "location /stats {"} {
+		reads := block(t, loaded, loc)
+		if strings.Contains(reads, "http_503") || !strings.Contains(reads, "proxy_next_upstream error timeout http_502;") {
+			t.Fatalf("%s must not retry 503:\n%s", loc, reads)
+		}
 	}
 
 	pg := containers(t, "postgres")[0]
@@ -131,22 +133,24 @@ func TestSlowReadIsNotRetried(t *testing.T) {
 		}
 	})
 
-	start := time.Now()
-	resp, err := http.Get(baseURL + "/rockets")
-	if err != nil {
-		t.Fatal(err)
+	for _, path := range []string{"/rockets", "/stats"} {
+		start := time.Now()
+		resp, err := http.Get(baseURL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		elapsed := time.Since(start)
+		if resp.StatusCode != http.StatusServiceUnavailable {
+			t.Errorf("GET %s with the database paused = %d, want 503", path, resp.StatusCode)
+		}
+		if elapsed > 9*time.Second { // one 5 s attempt, not three
+			t.Errorf("GET %s took %s: the 503 was retried on other replicas", path, elapsed)
+		}
 	}
-	_ = resp.Body.Close()
-	elapsed := time.Since(start)
 	run(t, "docker", "unpause", pg)
 	paused = false
 
-	if resp.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("GET /rockets with the database paused = %d, want 503", resp.StatusCode)
-	}
-	if elapsed > 9*time.Second { // one 5 s attempt, not three
-		t.Errorf("GET /rockets took %s: the 503 was retried on other replicas", elapsed)
-	}
 	channel := uniqueChannel(t)
 	for n := 1; n <= 6; n++ { // round-robin reaches every replica twice
 		if code := post(t, message(channel, n)); code != http.StatusAccepted {

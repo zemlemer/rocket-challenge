@@ -358,6 +358,7 @@ func TestSimulatorDefaultRun(t *testing.T) {
 	}
 	assertStateMatchesInbox(t)
 	assertAPIMatchesState(t)
+	assertStatsComplete(t)
 }
 
 // Spec deployment "One processor stopped": the others keep processing and
