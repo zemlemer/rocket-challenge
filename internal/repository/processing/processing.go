@@ -1,4 +1,5 @@
-package repository
+// Package processing implements the processor's repository port on PostgreSQL.
+package processing
 
 import (
 	"context"
@@ -8,33 +9,34 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"rockets/internal/domain"
+	"rockets/internal/postgres"
 	"rockets/internal/processor"
 )
 
-// Processing applies inbox entries to rocket state.
-type Processing struct {
+// Repository applies inbox entries to rocket state.
+type Repository struct {
 	pool *pgxpool.Pool
 	log  *slog.Logger
 }
 
-var _ processor.Repository = (*Processing)(nil)
+var _ processor.Repository = (*Repository)(nil)
 
-// NewProcessing returns a processing repository over pool.
-func NewProcessing(pool *pgxpool.Pool, log *slog.Logger) *Processing {
-	return &Processing{pool: pool, log: log}
+// New returns a processing repository over pool.
+func New(pool *pgxpool.Pool, log *slog.Logger) *Repository {
+	return &Repository{pool: pool, log: log}
 }
 
 // ProcessBatch claims up to limit unprocessed entries and processes them in
 // one transaction. If that fails for a reason other than unavailability, the
 // same entries are processed one per transaction, and an entry that fails on
 // its own is marked failed (design D5a).
-func (r *Processing) ProcessBatch(ctx context.Context, limit int, fold func([]domain.InboxEntry) domain.BatchResult) (int, error) {
+func (r *Repository) ProcessBatch(ctx context.Context, limit int, fold func([]domain.InboxEntry) domain.BatchResult) (int, error) {
 	ids, err := r.process(ctx, nil, limit, fold)
 	if err == nil {
 		return len(ids), nil
 	}
-	if isUnavailable(err) || len(ids) == 0 {
-		return 0, classifyProcessing("process batch", err)
+	if postgres.IsUnavailable(err) || len(ids) == 0 {
+		return 0, classify("process batch", err)
 	}
 
 	r.log.Error("batch failed, processing its entries one by one", "entries", len(ids), "error", err)
@@ -44,12 +46,12 @@ func (r *Processing) ProcessBatch(ctx context.Context, limit int, fold func([]do
 		switch {
 		case err == nil:
 			n += len(done)
-		case isUnavailable(err):
-			return n, classifyProcessing("process entry", err)
+		case postgres.IsUnavailable(err):
+			return n, classify("process entry", err)
 		default:
 			r.log.Error("entry failed", "inbox_id", id, "error", err)
 			if err := r.markFailed(ctx, id, err); err != nil {
-				return n, classifyProcessing("mark entry failed", err)
+				return n, classify("mark entry failed", err)
 			}
 			n++
 		}
@@ -60,7 +62,7 @@ func (r *Processing) ProcessBatch(ctx context.Context, limit int, fold func([]do
 // process claims entries (only entry id when given), folds them, applies the
 // deltas, marks the entries and commits. It returns the claimed ids, also on
 // error, so that the caller can isolate a failing entry.
-func (r *Processing) process(ctx context.Context, id *int64, limit int, fold func([]domain.InboxEntry) domain.BatchResult) (ids []int64, err error) {
+func (r *Repository) process(ctx context.Context, id *int64, limit int, fold func([]domain.InboxEntry) domain.BatchResult) (ids []int64, err error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return nil, err
@@ -201,7 +203,7 @@ func mark(ctx context.Context, tx pgx.Tx, decisions map[int64]domain.Decision) e
 	return err
 }
 
-func (r *Processing) markFailed(ctx context.Context, id int64, cause error) error {
+func (r *Repository) markFailed(ctx context.Context, id int64, cause error) error {
 	_, err := r.pool.Exec(ctx, `
 		update inbox set processed_at = now(), outcome = 'failed', reason = $2
 		where id = $1 and processed_at is null`, id, cause.Error())

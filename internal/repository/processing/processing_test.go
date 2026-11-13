@@ -1,4 +1,4 @@
-package repository_test
+package processing_test
 
 import (
 	"context"
@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"rockets/internal/domain"
-	"rockets/internal/repository"
+	"rockets/internal/repository/processing"
 	"rockets/internal/testdb"
 )
 
@@ -17,7 +17,7 @@ func TestProcessBatchAppliesAndMarks(t *testing.T) {
 	launch := testdb.InsertEntry(t, p, "c", 1, domain.TypeLaunched, `{"type":"Falcon-9","launchSpeed":500,"mission":"ARTEMIS"}`)
 	inc := testdb.InsertEntry(t, p, "c", 2, domain.TypeSpeedIncreased, `{"by":3000}`)
 	bad := testdb.InsertEntry(t, p, "c", 3, domain.TypeSpeedDecreased, `{"by":-5}`)
-	if n := drain(t, repository.NewProcessing(p, testdb.Logger()), 1000); n != 3 {
+	if n := testdb.Drain(t, processing.New(p, testdb.Logger()), 1000); n != 3 {
 		t.Fatalf("processed %d, want 3", n)
 	}
 	r := testdb.LoadRocket(t, p, "c")
@@ -38,9 +38,9 @@ func TestProcessBatchAppliesAndMarks(t *testing.T) {
 func TestClaimSkipsProcessedAndLocked(t *testing.T) {
 	_, p := testdb.Migrated(t)
 	ctx := context.Background()
-	repo := repository.NewProcessing(p, testdb.Logger())
+	repo := processing.New(p, testdb.Logger())
 	first := testdb.InsertEntry(t, p, "c", 1, domain.TypeLaunched, `{"type":"A","launchSpeed":1,"mission":"M"}`)
-	drain(t, repo, 10)
+	testdb.Drain(t, repo, 10)
 	locked := testdb.InsertEntry(t, p, "c", 2, domain.TypeSpeedIncreased, `{"by":1}`)
 	free := testdb.InsertEntry(t, p, "c", 3, domain.TypeSpeedIncreased, `{"by":1}`)
 
@@ -63,12 +63,12 @@ func TestClaimSkipsProcessedAndLocked(t *testing.T) {
 
 func TestSecondExplosionAcrossBatchesQuarantined(t *testing.T) {
 	_, p := testdb.Migrated(t)
-	repo := repository.NewProcessing(p, testdb.Logger())
+	repo := processing.New(p, testdb.Logger())
 	testdb.InsertEntry(t, p, "c", 1, domain.TypeLaunched, `{"type":"A","launchSpeed":1,"mission":"M"}`)
 	testdb.InsertEntry(t, p, "c", 9, domain.TypeExploded, `{"reason":"FIRST"}`)
-	drain(t, repo, 10)
+	testdb.Drain(t, repo, 10)
 	second := testdb.InsertEntry(t, p, "c", 4, domain.TypeExploded, `{"reason":"SECOND"}`)
-	drain(t, repo, 10)
+	testdb.Drain(t, repo, 10)
 	r := testdb.LoadRocket(t, p, "c")
 	o := outcomes(t, p)
 	if *r.ExplosionReason != "FIRST" || r.LastAppliedNumber != 9 || o[second].outcome != "quarantined" || *o[second].reason != domain.ReasonAlreadyExploded {
@@ -88,7 +88,7 @@ func TestPoisonEntryIsIsolatedAsFailed(t *testing.T) {
 	testdb.InsertEntry(t, p, "a", 2, domain.TypeSpeedIncreased, `{"by":5}`)
 	testdb.InsertEntry(t, p, "c", 3, domain.TypeSpeedIncreased, `{"by":9}`)
 
-	if n := drain(t, repository.NewProcessing(p, testdb.Logger()), 100); n != 4 {
+	if n := testdb.Drain(t, processing.New(p, testdb.Logger()), 100); n != 4 {
 		t.Fatalf("processed %d, want 4", n)
 	}
 	o := outcomes(t, p)
@@ -152,7 +152,7 @@ func TestUpsertMatchesDomainReference(t *testing.T) {
 
 		want := testdb.Expected(testdb.AllEntries(t, p))
 
-		drain(t, repository.NewProcessing(p, testdb.Logger()), rng.IntN(7)+1)
+		testdb.Drain(t, processing.New(p, testdb.Logger()), rng.IntN(7)+1)
 		for ch, w := range want {
 			got := testdb.LoadRocket(t, p, ch)
 			if testdb.Describe(got) != testdb.Describe(w) {

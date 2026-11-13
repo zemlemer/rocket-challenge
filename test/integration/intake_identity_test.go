@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"rockets/internal/handler"
-	"rockets/internal/repository"
+	"rockets/internal/repository/intake"
 	"rockets/internal/testdb"
 )
 
@@ -18,7 +18,7 @@ import (
 // sender redeliver forever.
 func TestIntakeIdentityEdgeCasesAgainstDatabase(t *testing.T) {
 	_, pool := testdb.Migrated(t)
-	messages := &handler.Messages{Repo: repository.NewInbox(pool), Log: testdb.Logger()}
+	messages := &handler.Messages{Repo: intake.NewInbox(pool), Log: testdb.Logger()}
 
 	body := func(channel, number string) string {
 		return `{"metadata":{"channel":` + channel + `,"messageNumber":` + number + `},"message":{}}`
@@ -83,7 +83,7 @@ func TestIntakeStoresFullMetadata(t *testing.T) {
 		`"messageTime":"2022-02-02T19:39:05.86337+01:00","messageType":"RocketLaunched"},` +
 		`"message":{"type":"Falcon-9","launchSpeed":500,"mission":"ARTEMIS"}}`
 	rec := httptest.NewRecorder()
-	(&handler.Messages{Repo: repository.NewInbox(pool), Log: testdb.Logger()}).ServeHTTP(rec,
+	(&handler.Messages{Repo: intake.NewInbox(pool), Log: testdb.Logger()}).ServeHTTP(rec,
 		httptest.NewRequest(http.MethodPost, "/messages", strings.NewReader(body)))
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status = %d", rec.Code)

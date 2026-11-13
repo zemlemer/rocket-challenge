@@ -1,6 +1,6 @@
-// Package repository implements the storage interfaces declared by the
+// Package intake implements the storage interfaces declared by the
 // handler package, using SQL over a PostgreSQL connection pool.
-package repository
+package intake
 
 import (
 	"context"

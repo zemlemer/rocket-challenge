@@ -1,4 +1,4 @@
-package repository
+package postgres_test
 
 import (
 	"context"
@@ -12,6 +12,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/puddle/v2"
+
+	"rockets/internal/postgres"
 )
 
 func TestIsUnavailable(t *testing.T) {
@@ -53,8 +55,8 @@ func TestIsUnavailable(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := isUnavailable(tt.err); got != tt.want {
-				t.Errorf("isUnavailable(%v) = %v, want %v", tt.err, got, tt.want)
+			if got := postgres.IsUnavailable(tt.err); got != tt.want {
+				t.Errorf("IsUnavailable(%v) = %v, want %v", tt.err, got, tt.want)
 			}
 		})
 	}

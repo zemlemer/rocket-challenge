@@ -1,4 +1,4 @@
-package repository_test
+package intake_test
 
 import (
 	"context"
@@ -12,7 +12,7 @@ import (
 
 	"rockets/internal/domain"
 	"rockets/internal/handler"
-	"rockets/internal/repository"
+	"rockets/internal/repository/intake"
 	"rockets/internal/testdb"
 )
 
@@ -47,7 +47,7 @@ func byChannel(cs []handler.ChannelStats) map[string]handler.ChannelStats {
 
 func TestStatsEmpty(t *testing.T) {
 	_, p := testdb.Migrated(t)
-	s, err := repository.NewStats(p).Stats(context.Background())
+	s, err := intake.NewStats(p).Stats(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +74,7 @@ func TestStatsCounts(t *testing.T) {
 	// Without identity: pending.
 	insertAnonymous(t, p)
 
-	s, err := repository.NewStats(p).Stats(context.Background())
+	s, err := intake.NewStats(p).Stats(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,13 +103,13 @@ func TestStatsCounts(t *testing.T) {
 // A redelivered message ends at intake's unique index, so it is counted once.
 func TestStatsRedeliveryCountedOnce(t *testing.T) {
 	_, p := testdb.Migrated(t)
-	inbox := repository.NewInbox(p)
+	inbox := intake.NewInbox(p)
 	for _, n := range []int64{1, 2, 2, 3} {
 		if err := inbox.Save(context.Background(), handler.InboxEntry{Metadata: withID("c1", n), Body: []byte(`{}`)}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	s, err := repository.NewStats(p).Stats(context.Background())
+	s, err := intake.NewStats(p).Stats(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +128,7 @@ func TestStatsOldestPending(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s, err := repository.NewStats(p).Stats(context.Background())
+	s, err := intake.NewStats(p).Stats(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +160,7 @@ func TestStatsDoesNotWaitForLockedRows(t *testing.T) {
 
 	sctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	s, err := repository.NewStats(p).Stats(sctx)
+	s, err := intake.NewStats(p).Stats(sctx)
 	if err != nil {
 		t.Fatalf("stats while rows are locked: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestStatsDoesNotWaitForLockedRows(t *testing.T) {
 
 func TestStatsUnavailable(t *testing.T) {
 	_, p := testdb.Migrated(t)
-	repo := repository.NewStats(p)
+	repo := intake.NewStats(p)
 	p.Close()
 	_, err := repo.Stats(context.Background())
 	if !errors.Is(err, handler.ErrUnavailable) || !strings.Contains(err.Error(), "read stats") {

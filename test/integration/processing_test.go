@@ -15,7 +15,8 @@ import (
 	"rockets/internal/handler"
 	"rockets/internal/postgres"
 	"rockets/internal/processor"
-	"rockets/internal/repository"
+	"rockets/internal/repository/intake"
+	"rockets/internal/repository/processing"
 	"rockets/internal/testdb"
 )
 
@@ -50,7 +51,7 @@ func TestFourProcessorsMatchReference(t *testing.T) {
 	url, p := testdb.Migrated(t)
 	ms := messages(rand.New(rand.NewPCG(1, 2)), 6, 60)
 	insertAll(t, p, ms[:len(ms)/2])
-	stop := runProcessors(t, repository.NewProcessing(limitedPool(t, url, postgres.ProcessorLimits), testdb.Logger()), 4)
+	stop := runProcessors(t, processing.New(limitedPool(t, url, postgres.ProcessorLimits), testdb.Logger()), 4)
 	insertAll(t, p, ms[len(ms)/2:])
 	waitProcessed(t, p, 30*time.Second)
 	stop()
@@ -63,7 +64,7 @@ func TestBatchInterruptedMidwayIsReappliedOnce(t *testing.T) {
 	url, p := testdb.Migrated(t)
 	insertAll(t, p, messages(rand.New(rand.NewPCG(3, 4)), 3, 20))
 	proxy, proxied := testdb.NewProxy(t, url)
-	repo := repository.NewProcessing(testdb.Pool(t, proxied), testdb.Logger())
+	repo := processing.New(testdb.Pool(t, proxied), testdb.Logger())
 
 	breakMidway := func(es []domain.InboxEntry) domain.BatchResult {
 		proxy.Stop() // after the claim, before the updates
@@ -99,7 +100,7 @@ func TestBatchInterruptedMidwayIsReappliedOnce(t *testing.T) {
 func TestProcessorResumesAfterOutage(t *testing.T) {
 	url, p := testdb.Migrated(t)
 	proxy, proxied := testdb.NewProxy(t, url)
-	stop := runProcessors(t, repository.NewProcessing(testdb.Pool(t, proxied), testdb.Logger()), 1)
+	stop := runProcessors(t, processing.New(testdb.Pool(t, proxied), testdb.Logger()), 1)
 	proxy.Stop()
 	insertAll(t, p, messages(rand.New(rand.NewPCG(5, 6)), 2, 15))
 	time.Sleep(time.Second)
@@ -130,7 +131,7 @@ func TestStuckTransactionLosesItsClaim(t *testing.T) {
 	}
 	// The stuck "processor" now does nothing.
 
-	repo := repository.NewProcessing(testdb.Pool(t, url), testdb.Logger())
+	repo := processing.New(testdb.Pool(t, url), testdb.Logger())
 	if n, err := repo.ProcessBatch(ctx, 1000, domain.Fold); err != nil || n != 0 {
 		t.Fatalf("claimed entries locked by the stuck session: n=%d err=%v", n, err)
 	}
@@ -150,7 +151,7 @@ func TestBlockedOnRocketRowBacksOff(t *testing.T) {
 	url, p := testdb.Migrated(t)
 	ctx := context.Background()
 	testdb.InsertEntry(t, p, "c", 1, domain.TypeLaunched, `{"type":"A","launchSpeed":1,"mission":"M"}`)
-	repo := repository.NewProcessing(limitedPool(t, url, postgres.SessionLimits{IdleInTransaction: 30 * time.Second, Statement: 30 * time.Second, Lock: 300 * time.Millisecond}), testdb.Logger())
+	repo := processing.New(limitedPool(t, url, postgres.SessionLimits{IdleInTransaction: 30 * time.Second, Statement: 30 * time.Second, Lock: 300 * time.Millisecond}), testdb.Logger())
 	if _, err := repo.ProcessBatch(ctx, 10, domain.Fold); err != nil {
 		t.Fatal(err)
 	}
@@ -182,17 +183,17 @@ func TestBlockedOnRocketRowBacksOff(t *testing.T) {
 // Spec message-intake (modified) "Redelivery after processing".
 func TestRedeliveryOfProcessedMessageIsDroppedAtIntake(t *testing.T) {
 	_, p := testdb.Migrated(t)
-	intake := &handler.Messages{Repo: repository.NewInbox(p), Log: testdb.Logger()}
+	inbox := &handler.Messages{Repo: intake.NewInbox(p), Log: testdb.Logger()}
 	const body = `{"metadata":{"channel":"c","messageNumber":1,"messageTime":"2022-02-02T19:39:05Z","messageType":"RocketLaunched"},"message":{"type":"A","launchSpeed":500,"mission":"M"}}`
 	post := func() int {
 		rec := httptest.NewRecorder()
-		intake.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/messages", strings.NewReader(body)))
+		inbox.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/messages", strings.NewReader(body)))
 		return rec.Code
 	}
 	if post() != http.StatusAccepted {
 		t.Fatal("first delivery not accepted")
 	}
-	repo := repository.NewProcessing(p, testdb.Logger())
+	repo := processing.New(p, testdb.Logger())
 	if _, err := repo.ProcessBatch(context.Background(), 10, domain.Fold); err != nil {
 		t.Fatal(err)
 	}
@@ -209,11 +210,11 @@ func TestRedeliveryOfProcessedMessageIsDroppedAtIntake(t *testing.T) {
 func TestInvalidChannelIsQuarantinedAfterIntake(t *testing.T) {
 	_, p := testdb.Migrated(t)
 	ctx := context.Background()
-	intake := &handler.Messages{Repo: repository.NewInbox(p), Log: testdb.Logger()}
+	inbox := &handler.Messages{Repo: intake.NewInbox(p), Log: testdb.Logger()}
 	post := func(body string) {
 		t.Helper()
 		rec := httptest.NewRecorder()
-		intake.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/messages", strings.NewReader(body)))
+		inbox.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/messages", strings.NewReader(body)))
 		if rec.Code != http.StatusAccepted {
 			t.Fatalf("POST status = %d, want 202", rec.Code)
 		}
@@ -235,7 +236,7 @@ func TestInvalidChannelIsQuarantinedAfterIntake(t *testing.T) {
 		t.Fatalf("invalid channel entries = %d, want 1", invalidEntries)
 	}
 
-	repo := repository.NewProcessing(p, testdb.Logger())
+	repo := processing.New(p, testdb.Logger())
 	if n, err := repo.ProcessBatch(ctx, 10, domain.Fold); err != nil || n != 3 {
 		t.Fatalf("processed n=%d err=%v, want 3 entries", n, err)
 	}

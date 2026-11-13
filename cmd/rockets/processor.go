@@ -10,7 +10,7 @@ import (
 	"rockets/data"
 	"rockets/internal/postgres"
 	"rockets/internal/processor"
-	"rockets/internal/repository"
+	"rockets/internal/repository/processing"
 )
 
 // ProcessorCmd works through the inbox and maintains rocket state. Its
@@ -45,7 +45,7 @@ func (c *ProcessorCmd) Run(ctx context.Context, g *Globals, log *slog.Logger) er
 		return err
 	}
 
-	p := processor.New(repository.NewProcessing(pool, log), log)
+	p := processor.New(processing.New(pool, log), log)
 	errc := make(chan error, 1)
 	go func() { errc <- p.Run(ctx) }()
 	log.Info("processor started", "batch_size", processor.BatchSize, "poll_interval", processor.PollInterval)
