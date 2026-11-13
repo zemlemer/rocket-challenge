@@ -35,6 +35,46 @@ func TestProcessBatchAppliesAndMarks(t *testing.T) {
 	}
 }
 
+func TestOversizedEntriesAreQuarantined(t *testing.T) {
+	_, p := testdb.Migrated(t)
+	ctx := t.Context()
+	repo := processing.New(p, testdb.Logger())
+	testdb.InsertEntry(t, p, "c", 1, domain.TypeLaunched, `{"type":"A","launchSpeed":100,"mission":"M"}`)
+	testdb.Drain(t, repo, 10)
+	before := testdb.Describe(testdb.LoadRocket(t, p, "c"))
+
+	const prefix = `{"message":{"by":25}}`
+	var oversized, historical int64
+	if err := p.QueryRow(ctx, `insert into inbox (body, truncated) values ($1, true) returning id`, []byte{}).Scan(&oversized); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.QueryRow(ctx, `
+		insert into inbox (channel, message_number, message_time, message_type, body, truncated)
+		values ('c', 2, now(), $1, $2, true) returning id`, domain.TypeSpeedIncreased, []byte(prefix)).Scan(&historical); err != nil {
+		t.Fatal(err)
+	}
+	if n := testdb.Drain(t, repo, 10); n != 2 {
+		t.Fatalf("processed %d entries, want 2", n)
+	}
+	for id, wantBody := range map[int64]string{oversized: "", historical: prefix} {
+		var body []byte
+		var outcome, reason string
+		if err := p.QueryRow(ctx, `select body, outcome, reason from inbox where id = $1`, id).Scan(&body, &outcome, &reason); err != nil {
+			t.Fatal(err)
+		}
+		if string(body) != wantBody || outcome != string(domain.Quarantined) || !strings.Contains(reason, "1 MiB size limit") {
+			t.Errorf("entry %d: body = %q, outcome = %q, reason = %q", id, body, outcome, reason)
+		}
+	}
+	if after := testdb.Describe(testdb.LoadRocket(t, p, "c")); after != before {
+		t.Errorf("rocket state changed from %s to %s", before, after)
+	}
+	var rocketCount int
+	if err := p.QueryRow(ctx, `select count(*) from rockets`).Scan(&rocketCount); err != nil || rocketCount != 1 {
+		t.Fatalf("rockets = %d, err = %v, want only the existing rocket", rocketCount, err)
+	}
+}
+
 func TestClaimSkipsProcessedAndLocked(t *testing.T) {
 	_, p := testdb.Migrated(t)
 	ctx := context.Background()

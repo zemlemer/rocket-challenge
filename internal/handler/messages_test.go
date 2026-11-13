@@ -29,6 +29,9 @@ func TestEveryContentIsAccepted(t *testing.T) {
 			if len(repo.entries) != 1 || string(repo.entries[0].Body) != body {
 				t.Fatalf("stored %+v, want the body as is", repo.entries)
 			}
+			if repo.entries[0].Truncated {
+				t.Fatal("body within the size limit was marked truncated")
+			}
 		})
 	}
 }
@@ -62,40 +65,51 @@ func TestDuplicatesAreAccepted(t *testing.T) {
 }
 
 func TestBodySizeBoundary(t *testing.T) {
-	t.Run("exactly 1 MiB is complete", func(t *testing.T) {
-		repo := &fakeRepo{}
-		rec := post(t, repo, strings.NewReader(strings.Repeat("x", handler.MaxBodyBytes)))
-		e := repo.entries[0]
-		if rec.Code != http.StatusAccepted || e.Truncated || len(e.Body) != handler.MaxBodyBytes {
-			t.Fatalf("status=%d truncated=%v len=%d", rec.Code, e.Truncated, len(e.Body))
-		}
-	})
-	t.Run("1 MiB + 1 is truncated", func(t *testing.T) {
-		repo := &fakeRepo{}
-		post(t, repo, strings.NewReader(strings.Repeat("x", handler.MaxBodyBytes+1)))
-		if e := repo.entries[0]; !e.Truncated || len(e.Body) != handler.MaxBodyBytes {
-			t.Fatalf("truncated=%v len=%d", e.Truncated, len(e.Body))
-		}
-	})
-	t.Run("2 MiB message is truncated and has no identity", func(t *testing.T) {
-		repo := &fakeRepo{}
-		big := msg(`"c1"`, `1`) + strings.Repeat(" ", 2*handler.MaxBodyBytes)
-		rec := post(t, repo, strings.NewReader(big))
-		e := repo.entries[0]
-		if rec.Code != http.StatusAccepted || !e.Truncated || e.Identity != nil || len(e.Body) != handler.MaxBodyBytes {
-			t.Fatalf("status=%d truncated=%v identity=%v len=%d", rec.Code, e.Truncated, e.Identity, len(e.Body))
-		}
-	})
+	for _, tc := range []struct {
+		name string
+		size int
+	}{
+		{"exactly 1 MiB", handler.MaxBodyBytes},
+		{"1 MiB + 1 byte", handler.MaxBodyBytes + 1},
+		{"2 MiB", 2 * handler.MaxBodyBytes},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := &fakeRepo{}
+			prefix := msg(`"c1"`, `1`)
+			body := prefix + strings.Repeat(" ", tc.size-len(prefix))
+			rec := post(t, repo, strings.NewReader(body))
+			if rec.Code != http.StatusAccepted || len(repo.entries) != 1 {
+				t.Fatalf("status = %d, stored %d entries", rec.Code, len(repo.entries))
+			}
+			e := repo.entries[0]
+			if tc.size == handler.MaxBodyBytes {
+				if e.Truncated || string(e.Body) != body || e.Identity == nil {
+					t.Fatalf("exact-limit entry: truncated=%v len=%d identity=%v", e.Truncated, len(e.Body), e.Identity)
+				}
+				return
+			}
+			if !e.Truncated || len(e.Body) != 0 || e.Metadata != (handler.Metadata{}) {
+				t.Fatalf("oversized entry: truncated=%v len=%d metadata=%+v", e.Truncated, len(e.Body), e.Metadata)
+			}
+		})
+	}
 }
 
 func TestAbortedBodyStoresNothing(t *testing.T) {
-	repo := &fakeRepo{}
-	rec := post(t, repo, io.MultiReader(strings.NewReader(msg(`"c1"`, `1`)[:20]), failingReader{}))
-	if rec.Code < 500 {
-		t.Fatalf("status = %d, want 5xx", rec.Code)
-	}
-	if len(repo.entries) != 0 {
-		t.Fatalf("stored %d entries from an aborted body", len(repo.entries))
+	for name, partial := range map[string]string{
+		"below limit": msg(`"c1"`, `1`)[:20],
+		"above limit": strings.Repeat("x", handler.MaxBodyBytes+1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			repo := &fakeRepo{}
+			rec := post(t, repo, io.MultiReader(strings.NewReader(partial), failingReader{}))
+			if rec.Code < 500 {
+				t.Fatalf("status = %d, want 5xx", rec.Code)
+			}
+			if len(repo.entries) != 0 {
+				t.Fatalf("stored %d entries from an aborted body", len(repo.entries))
+			}
+		})
 	}
 }
 

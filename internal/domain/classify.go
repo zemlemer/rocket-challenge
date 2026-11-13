@@ -11,7 +11,7 @@ import (
 func Classify(e InboxEntry) (Message, error) {
 	switch {
 	case e.Truncated:
-		return Message{}, reject("body: truncated")
+		return Message{}, reject("body: exceeds the 1 MiB size limit")
 	case e.Channel == nil || e.MessageNumber == nil:
 		return Message{}, reject("metadata: channel and messageNumber required")
 	case !ValidChannel(*e.Channel):
