@@ -4,8 +4,6 @@ import (
 	"context"
 	"sync"
 	"time"
-
-	"rockets/internal/domain"
 )
 
 // step is one scripted ProcessBatch result.
@@ -22,7 +20,7 @@ type fakeRepo struct {
 	cancel context.CancelFunc
 }
 
-func (f *fakeRepo) ProcessBatch(_ context.Context, limit int, _ func([]domain.InboxEntry) domain.BatchResult) (int, error) {
+func (f *fakeRepo) ProcessBatch(_ context.Context, limit int) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.limits = append(f.limits, limit)
