@@ -12,7 +12,7 @@ import (
 	"rockets/data"
 	"rockets/internal/handler"
 	"rockets/internal/postgres"
-	"rockets/internal/repository"
+	"rockets/internal/repository/intake"
 	"rockets/internal/server"
 )
 
@@ -48,14 +48,14 @@ func (c *ServerCmd) Run(ctx context.Context, g *Globals, log *slog.Logger) error
 		return fmt.Errorf("listen on %s: %w", c.HTTPAddr, err)
 	}
 
-	inbox := repository.NewInbox(pool)
-	rockets := &handler.Rockets{Repo: repository.NewRockets(pool), Log: log}
+	inbox := intake.NewInbox(pool)
+	rockets := &handler.Rockets{Repo: intake.NewRockets(pool), Log: log}
 	routes := server.Routes(server.Handlers{
 		Messages: &handler.Messages{Repo: inbox, Log: log},
 		Health:   handler.Health{},
 		Rockets:  http.HandlerFunc(rockets.List),
 		Rocket:   http.HandlerFunc(rockets.Get),
-		Stats:    &handler.Stats{Repo: repository.NewStats(pool), Log: log},
+		Stats:    &handler.Stats{Repo: intake.NewStats(pool), Log: log},
 	})
 	return server.Run(ctx, l, routes, c.ShutdownTimeout, log)
 }

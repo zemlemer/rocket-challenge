@@ -15,7 +15,7 @@ import (
 	"rockets/internal/domain"
 	"rockets/internal/handler"
 	"rockets/internal/postgres"
-	"rockets/internal/repository"
+	"rockets/internal/repository/intake"
 	"rockets/internal/server"
 	"rockets/internal/testdb"
 )
@@ -114,13 +114,13 @@ func assertMatchesReference(t *testing.T, p *pgxpool.Pool) {
 // `rockets server` does.
 func serverRoutes(p *pgxpool.Pool) http.Handler {
 	log := testdb.Logger()
-	rockets := &handler.Rockets{Repo: repository.NewRockets(p), Log: log}
+	rockets := &handler.Rockets{Repo: intake.NewRockets(p), Log: log}
 	return server.Routes(server.Handlers{
-		Messages: &handler.Messages{Repo: repository.NewInbox(p), Log: log},
+		Messages: &handler.Messages{Repo: intake.NewInbox(p), Log: log},
 		Health:   handler.Health{},
 		Rockets:  http.HandlerFunc(rockets.List),
 		Rocket:   http.HandlerFunc(rockets.Get),
-		Stats:    &handler.Stats{Repo: repository.NewStats(p), Log: log},
+		Stats:    &handler.Stats{Repo: intake.NewStats(p), Log: log},
 	})
 }
 

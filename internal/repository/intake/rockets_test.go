@@ -1,4 +1,4 @@
-package repository_test
+package intake_test
 
 import (
 	"context"
@@ -9,7 +9,8 @@ import (
 
 	"rockets/internal/domain"
 	"rockets/internal/handler"
-	"rockets/internal/repository"
+	"rockets/internal/repository/intake"
+	"rockets/internal/repository/processing"
 	"rockets/internal/testdb"
 )
 
@@ -26,7 +27,7 @@ func TestRocketsSorting(t *testing.T) {
 	} {
 		insertRocket(t, p, r)
 	}
-	repo := repository.NewRockets(p)
+	repo := intake.NewRockets(p)
 
 	for _, tc := range []struct {
 		sort      handler.SortField
@@ -57,7 +58,7 @@ func TestRocketsSorting(t *testing.T) {
 
 func TestRocketsEmpty(t *testing.T) {
 	_, p := testdb.Migrated(t)
-	got, err := repository.NewRockets(p).Rockets(context.Background(), handler.RocketQuery{Sort: handler.SortChannel, Order: handler.Asc})
+	got, err := intake.NewRockets(p).Rockets(context.Background(), handler.RocketQuery{Sort: handler.SortChannel, Order: handler.Asc})
 	if err != nil || got == nil || len(got) != 0 {
 		t.Fatalf("got %v, %v; want an empty non-nil list", got, err)
 	}
@@ -68,17 +69,17 @@ func TestRocketsEmpty(t *testing.T) {
 func TestRocketVisibilityThroughProcessing(t *testing.T) {
 	_, p := testdb.Migrated(t)
 	ctx := context.Background()
-	proc := repository.NewProcessing(p, testdb.Logger())
-	repo := repository.NewRockets(p)
+	proc := processing.New(p, testdb.Logger())
+	repo := intake.NewRockets(p)
 
 	testdb.InsertEntry(t, p, "c1", 2, domain.TypeSpeedIncreased, `{"by":300}`)
-	drain(t, proc, 10)
+	testdb.Drain(t, proc, 10)
 	if _, ok, err := repo.Rocket(ctx, "c1"); err != nil || ok {
 		t.Fatalf("rocket with only a speed change: ok=%v err=%v, want hidden", ok, err)
 	}
 
 	testdb.InsertEntry(t, p, "c1", 5, domain.TypeExploded, `{"reason":"FROZEN_O_RINGS"}`)
-	drain(t, proc, 10)
+	testdb.Drain(t, proc, 10)
 	r, ok, err := repo.Rocket(ctx, "c1")
 	if err != nil || !ok {
 		t.Fatalf("exploded rocket: ok=%v err=%v, want visible", ok, err)
@@ -88,7 +89,7 @@ func TestRocketVisibilityThroughProcessing(t *testing.T) {
 	}
 
 	testdb.InsertEntry(t, p, "c1", 1, domain.TypeLaunched, `{"type":"Falcon-9","launchSpeed":500,"mission":"ARTEMIS"}`)
-	drain(t, proc, 10)
+	testdb.Drain(t, proc, 10)
 	r, ok, err = repo.Rocket(ctx, "c1")
 	if err != nil || !ok || *r.RocketType != "Falcon-9" || *r.LaunchSpeed != 500 || *r.Mission != "ARTEMIS" || r.Speed != 800 || *r.ExplosionReason != "FROZEN_O_RINGS" {
 		t.Fatalf("after late launch: ok=%v err=%v rocket=%s", ok, err, testdb.Describe(r))
@@ -103,7 +104,7 @@ func TestRocketVisibilityThroughProcessing(t *testing.T) {
 func TestRocketExactChannel(t *testing.T) {
 	_, p := testdb.Migrated(t)
 	insertRocket(t, p, stored{channel: "abc-1", typ: testdb.Ptr("A"), mission: testdb.Ptr("M"), launched: testdb.Ptr(testdb.MessageTime)})
-	repo := repository.NewRockets(p)
+	repo := intake.NewRockets(p)
 	for channel, want := range map[string]bool{"abc-1": true, "ABC-1": false, "abc": false, "missing": false} {
 		if _, ok, err := repo.Rocket(context.Background(), channel); err != nil || ok != want {
 			t.Errorf("Rocket(%q) ok=%v err=%v, want %v", channel, ok, err, want)
@@ -113,7 +114,7 @@ func TestRocketExactChannel(t *testing.T) {
 
 func TestRocketsUnavailable(t *testing.T) {
 	_, p := testdb.Migrated(t)
-	repo := repository.NewRockets(p)
+	repo := intake.NewRockets(p)
 	p.Close()
 	if _, _, err := repo.Rocket(context.Background(), "c"); !errors.Is(err, handler.ErrUnavailable) {
 		t.Errorf("Rocket on closed pool: %v, want ErrUnavailable", err)
@@ -127,7 +128,7 @@ func TestRocketsUnavailable(t *testing.T) {
 // otherwise a valid request would fail with 500.
 func TestEverySortFieldIsSupported(t *testing.T) {
 	_, p := testdb.Migrated(t)
-	repo := repository.NewRockets(p)
+	repo := intake.NewRockets(p)
 	for _, f := range handler.SortFields() {
 		if _, err := repo.Rockets(context.Background(), handler.RocketQuery{Sort: f, Order: handler.Asc}); err != nil {
 			t.Errorf("sort %q: %v", f, err)

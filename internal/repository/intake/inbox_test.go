@@ -1,4 +1,4 @@
-package repository_test
+package intake_test
 
 import (
 	"context"
@@ -8,13 +8,13 @@ import (
 	"time"
 
 	"rockets/internal/handler"
-	"rockets/internal/repository"
+	"rockets/internal/repository/intake"
 	"rockets/internal/testdb"
 )
 
 func TestSaveStoresEntries(t *testing.T) {
 	p := testdb.Pool(t, migratedDB(t))
-	repo := repository.NewInbox(p)
+	repo := intake.NewInbox(p)
 	ctx := context.Background()
 
 	for _, e := range []handler.InboxEntry{
@@ -49,7 +49,7 @@ func TestSaveStoresEntries(t *testing.T) {
 
 func TestConcurrentIdenticalSavesStoreOneRow(t *testing.T) {
 	p := testdb.Pool(t, migratedDB(t))
-	repo := repository.NewInbox(p)
+	repo := intake.NewInbox(p)
 	var wg sync.WaitGroup
 	errs := make(chan error, 20)
 	for range 20 {
@@ -74,7 +74,7 @@ func TestConcurrentIdenticalSavesStoreOneRow(t *testing.T) {
 // Two independent pools behave like two server instances.
 func TestTwoInstancesStoreEachIdentityOnce(t *testing.T) {
 	url := migratedDB(t)
-	repos := []*repository.Inbox{repository.NewInbox(testdb.Pool(t, url)), repository.NewInbox(testdb.Pool(t, url))}
+	repos := []*intake.Inbox{intake.NewInbox(testdb.Pool(t, url)), intake.NewInbox(testdb.Pool(t, url))}
 
 	var wg sync.WaitGroup
 	for i, repo := range repos {
@@ -110,7 +110,7 @@ func TestErrorClassification(t *testing.T) {
 	t.Run("closed pool is unavailable", func(t *testing.T) {
 		p := testdb.Pool(t, url)
 		p.Close()
-		repo := repository.NewInbox(p)
+		repo := intake.NewInbox(p)
 		if err := repo.Save(context.Background(), handler.InboxEntry{Body: []byte(`x`)}); !errors.Is(err, handler.ErrUnavailable) {
 			t.Fatalf("Save err = %v, want ErrUnavailable", err)
 		}
@@ -118,7 +118,7 @@ func TestErrorClassification(t *testing.T) {
 
 	t.Run("statement error is not unavailable", func(t *testing.T) {
 		// Bypasses identity extraction on purpose: PostgreSQL rejects NUL in text.
-		repo := repository.NewInbox(testdb.Pool(t, url))
+		repo := intake.NewInbox(testdb.Pool(t, url))
 		err := repo.Save(context.Background(), handler.InboxEntry{Metadata: withID("a\x00b", 1), Body: []byte(`x`)})
 		if err == nil || errors.Is(err, handler.ErrUnavailable) {
 			t.Fatalf("err = %v, want a non-unavailable error", err)
@@ -131,10 +131,10 @@ func TestSaveStoresMetadataColumns(t *testing.T) {
 	at := time.Date(2022, 2, 2, 18, 39, 5, 863370000, time.UTC)
 	typ := "RocketTeleported"
 	md := handler.Metadata{Identity: id("c9", 4), MessageTime: &at, MessageType: &typ}
-	if err := repository.NewInbox(p).Save(context.Background(), handler.InboxEntry{Metadata: md, Body: []byte(`{}`)}); err != nil {
+	if err := intake.NewInbox(p).Save(context.Background(), handler.InboxEntry{Metadata: md, Body: []byte(`{}`)}); err != nil {
 		t.Fatal(err)
 	}
-	if err := repository.NewInbox(p).Save(context.Background(), handler.InboxEntry{Body: []byte(`x`)}); err != nil {
+	if err := intake.NewInbox(p).Save(context.Background(), handler.InboxEntry{Body: []byte(`x`)}); err != nil {
 		t.Fatal(err)
 	}
 

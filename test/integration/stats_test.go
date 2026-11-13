@@ -13,7 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"rockets/internal/domain"
-	"rockets/internal/repository"
+	"rockets/internal/repository/processing"
 	"rockets/internal/testdb"
 )
 
@@ -83,7 +83,7 @@ func TestStatsReportsIntakeAndProcessing(t *testing.T) {
 		t.Fatalf("before processing: %+v", before.Inbox)
 	}
 
-	proc := repository.NewProcessing(p, testdb.Logger())
+	proc := processing.New(p, testdb.Logger())
 	for {
 		n, err := proc.ProcessBatch(context.Background(), 25, domain.Fold)
 		if err != nil {

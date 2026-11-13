@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"rockets/internal/domain"
-	"rockets/internal/repository"
+	"rockets/internal/repository/processing"
 	"rockets/internal/testdb"
 )
 
@@ -45,7 +45,7 @@ func TestQueryAPIReadsProcessedState(t *testing.T) {
 	if rec := do(http.MethodGet, "/rockets/c1", ""); rec.Code != http.StatusNotFound {
 		t.Fatalf("before processing: GET /rockets/c1 = %d, want 404", rec.Code)
 	}
-	if _, err := repository.NewProcessing(p, log).ProcessBatch(ctx, 100, domain.Fold); err != nil {
+	if _, err := processing.New(p, log).ProcessBatch(ctx, 100, domain.Fold); err != nil {
 		t.Fatal(err)
 	}
 	// A launched row stored before the channel rule existed.
@@ -99,7 +99,7 @@ func TestReadDuringProcessing(t *testing.T) {
 	_, p := testdb.Migrated(t)
 	ctx := context.Background()
 	testdb.InsertEntry(t, p, "c1", 1, domain.TypeLaunched, `{"type":"Falcon-9","launchSpeed":500,"mission":"ARTEMIS"}`)
-	if _, err := repository.NewProcessing(p, testdb.Logger()).ProcessBatch(ctx, 10, domain.Fold); err != nil {
+	if _, err := processing.New(p, testdb.Logger()).ProcessBatch(ctx, 10, domain.Fold); err != nil {
 		t.Fatal(err)
 	}
 	routes := serverRoutes(p)
@@ -142,7 +142,7 @@ func TestFieldsBeforeLaunch(t *testing.T) {
 	if _, err := p.Exec(ctx, `update inbox set message_time = $1 where message_number = 4`, testdb.MessageTime.Add(-time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	proc := repository.NewProcessing(p, testdb.Logger())
+	proc := processing.New(p, testdb.Logger())
 	if _, err := proc.ProcessBatch(ctx, 10, domain.Fold); err != nil {
 		t.Fatal(err)
 	}

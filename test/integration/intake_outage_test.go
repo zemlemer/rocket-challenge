@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"rockets/internal/handler"
-	"rockets/internal/repository"
+	"rockets/internal/repository/intake"
 	"rockets/internal/testdb"
 )
 
@@ -18,7 +18,7 @@ import (
 func TestIntakeRecoversFromDatabaseOutage(t *testing.T) {
 	url, _ := testdb.Migrated(t)
 	proxy, proxied := testdb.NewProxy(t, url)
-	repo := repository.NewInbox(testdb.Pool(t, proxied))
+	repo := intake.NewInbox(testdb.Pool(t, proxied))
 	messages := &handler.Messages{Repo: repo, Log: testdb.Logger()}
 	health := handler.Health{}
 
