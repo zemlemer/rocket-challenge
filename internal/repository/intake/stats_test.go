@@ -140,6 +140,35 @@ func TestStatsOldestPending(t *testing.T) {
 	}
 }
 
+// Spec processing-stats "Storage order differs from receive order": the entry
+// stored later (larger id) was received earlier and is the oldest pending.
+func TestStatsOldestPendingByReceiveTimeNotID(t *testing.T) {
+	_, p := testdb.Migrated(t)
+	ctx := context.Background()
+	first := testdb.InsertEntry(t, p, "c1", 1, domain.TypeLaunched, `{}`)
+	second := testdb.InsertEntry(t, p, "c1", 2, domain.TypeSpeedIncreased, `{}`)
+	if first >= second {
+		t.Fatalf("ids %d, %d: want the second entry stored with the larger id", first, second)
+	}
+	if _, err := p.Exec(ctx, `
+		update inbox set received_at = now() - case id when $1 then interval '1 second' else interval '5 seconds' end
+		where id in ($1, $2)`, first, second); err != nil {
+		t.Fatal(err)
+	}
+	var want time.Time
+	if err := p.QueryRow(ctx, `select received_at from inbox where id = $1`, second).Scan(&want); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := intake.NewStats(p).Stats(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Inbox.OldestPendingAt == nil || !s.Inbox.OldestPendingAt.Equal(want) {
+		t.Fatalf("oldest pending = %v, want %v (entry %d, received first)", s.Inbox.OldestPendingAt, want, second)
+	}
+}
+
 // The report reads past rows a processor has locked instead of waiting.
 func TestStatsDoesNotWaitForLockedRows(t *testing.T) {
 	_, p := testdb.Migrated(t)
