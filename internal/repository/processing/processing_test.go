@@ -92,7 +92,7 @@ func TestClaimSkipsProcessedAndLocked(t *testing.T) {
 	if _, err := tx.Exec(ctx, `select 1 from inbox where id = $1 for update`, locked); err != nil {
 		t.Fatal(err)
 	}
-	if n, err := repo.ProcessBatch(ctx, 10, domain.Fold); err != nil || n != 1 {
+	if n, err := repo.ProcessBatch(ctx, 10); err != nil || n != 1 {
 		t.Fatalf("n=%d err=%v, want only the free entry", n, err)
 	}
 	o := outcomes(t, p)

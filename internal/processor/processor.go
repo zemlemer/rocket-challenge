@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"time"
 
-	"rockets/internal/domain"
 	"rockets/pkg/helpers"
 )
 
@@ -28,9 +27,9 @@ var ErrUnavailable = errors.New("storage unavailable")
 // Repository is what the processor needs from storage.
 type Repository interface {
 	// ProcessBatch claims up to limit unprocessed entries in one transaction,
-	// passes them to fold, applies the resulting deltas, marks every entry as
-	// decided and commits. It returns the number of entries processed.
-	ProcessBatch(ctx context.Context, limit int, fold func([]domain.InboxEntry) domain.BatchResult) (int, error)
+	// folds them with domain.Fold, applies the resulting deltas, marks every
+	// entry as decided and commits. It returns the number of entries processed.
+	ProcessBatch(ctx context.Context, limit int) (int, error)
 }
 
 // Processor runs the processing loop.
@@ -72,7 +71,7 @@ func (p *Processor) Run(ctx context.Context) error {
 	attempt := 0
 	for ctx.Err() == nil {
 		bctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), batchTimeout)
-		n, err := p.repo.ProcessBatch(bctx, p.batchSize, domain.Fold)
+		n, err := p.repo.ProcessBatch(bctx, p.batchSize)
 		cancel()
 
 		if err != nil {

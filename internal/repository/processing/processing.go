@@ -30,8 +30,8 @@ func New(pool *pgxpool.Pool, log *slog.Logger) *Repository {
 // one transaction. If that fails for a reason other than unavailability, the
 // same entries are processed one per transaction, and an entry that fails on
 // its own is marked failed (design D5a).
-func (r *Repository) ProcessBatch(ctx context.Context, limit int, fold func([]domain.InboxEntry) domain.BatchResult) (int, error) {
-	ids, err := r.process(ctx, nil, limit, fold)
+func (r *Repository) ProcessBatch(ctx context.Context, limit int) (int, error) {
+	ids, err := r.process(ctx, nil, limit)
 	if err == nil {
 		return len(ids), nil
 	}
@@ -42,7 +42,7 @@ func (r *Repository) ProcessBatch(ctx context.Context, limit int, fold func([]do
 	r.log.Error("batch failed, processing its entries one by one", "entries", len(ids), "error", err)
 	n := 0
 	for _, id := range ids {
-		done, err := r.process(ctx, &id, 1, fold)
+		done, err := r.process(ctx, &id, 1)
 		switch {
 		case err == nil:
 			n += len(done)
@@ -62,7 +62,7 @@ func (r *Repository) ProcessBatch(ctx context.Context, limit int, fold func([]do
 // process claims entries (only entry id when given), folds them, applies the
 // deltas, marks the entries and commits. It returns the claimed ids, also on
 // error, so that the caller can isolate a failing entry.
-func (r *Repository) process(ctx context.Context, id *int64, limit int, fold func([]domain.InboxEntry) domain.BatchResult) (ids []int64, err error) {
+func (r *Repository) process(ctx context.Context, id *int64, limit int) (ids []int64, err error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return nil, err
@@ -80,7 +80,7 @@ func (r *Repository) process(ctx context.Context, id *int64, limit int, fold fun
 		return nil, tx.Commit(ctx)
 	}
 
-	res := fold(entries)
+	res := domain.Fold(entries)
 	decisions := make(map[int64]domain.Decision, len(res.Decisions))
 	for _, d := range res.Decisions {
 		decisions[d.EntryID] = d

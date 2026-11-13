@@ -45,7 +45,7 @@ func TestQueryAPIReadsProcessedState(t *testing.T) {
 	if rec := do(http.MethodGet, "/rockets/c1", ""); rec.Code != http.StatusNotFound {
 		t.Fatalf("before processing: GET /rockets/c1 = %d, want 404", rec.Code)
 	}
-	if _, err := processing.New(p, log).ProcessBatch(ctx, 100, domain.Fold); err != nil {
+	if _, err := processing.New(p, log).ProcessBatch(ctx, 100); err != nil {
 		t.Fatal(err)
 	}
 	// A launched row stored before the channel rule existed.
@@ -99,7 +99,7 @@ func TestReadDuringProcessing(t *testing.T) {
 	_, p := testdb.Migrated(t)
 	ctx := context.Background()
 	testdb.InsertEntry(t, p, "c1", 1, domain.TypeLaunched, `{"type":"Falcon-9","launchSpeed":500,"mission":"ARTEMIS"}`)
-	if _, err := processing.New(p, testdb.Logger()).ProcessBatch(ctx, 10, domain.Fold); err != nil {
+	if _, err := processing.New(p, testdb.Logger()).ProcessBatch(ctx, 10); err != nil {
 		t.Fatal(err)
 	}
 	routes := serverRoutes(p)
@@ -143,7 +143,7 @@ func TestFieldsBeforeLaunch(t *testing.T) {
 		t.Fatal(err)
 	}
 	proc := processing.New(p, testdb.Logger())
-	if _, err := proc.ProcessBatch(ctx, 10, domain.Fold); err != nil {
+	if _, err := proc.ProcessBatch(ctx, 10); err != nil {
 		t.Fatal(err)
 	}
 	routes := serverRoutes(p)
@@ -154,7 +154,7 @@ func TestFieldsBeforeLaunch(t *testing.T) {
 	}
 
 	testdb.InsertEntry(t, p, "c1", 1, domain.TypeLaunched, `{"type":"Falcon-9","launchSpeed":500,"mission":"ARTEMIS"}`)
-	if _, err := proc.ProcessBatch(ctx, 10, domain.Fold); err != nil {
+	if _, err := proc.ProcessBatch(ctx, 10); err != nil {
 		t.Fatal(err)
 	}
 	r = getRocket(t, routes, "c1")

@@ -62,19 +62,47 @@ func TestFourProcessorsMatchReference(t *testing.T) {
 	assertMatchesReference(t, p)
 }
 
+// stopAfterClaim stops the proxy once the claim query has returned its rows,
+// once armed: the batch holds its entries but has not updated anything yet.
+type stopAfterClaim struct {
+	proxy *testdb.Proxy
+	armed atomic.Bool
+}
+
+func (s *stopAfterClaim) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryStartData) context.Context {
+	return ctx
+}
+
+func (s *stopAfterClaim) TraceQueryEnd(_ context.Context, _ *pgx.Conn, data pgx.TraceQueryEndData) {
+	if data.Err == nil && strings.Contains(data.CommandTag.String(), "SELECT") && s.armed.CompareAndSwap(true, false) {
+		s.proxy.Stop()
+	}
+}
+
 // Spec "Crash safety": the database goes away in the middle of a batch; the
 // batch has no effect and a re-run applies everything once.
 func TestBatchInterruptedMidwayIsReappliedOnce(t *testing.T) {
 	url, p := testdb.Migrated(t)
 	insertAll(t, p, messages(rand.New(rand.NewPCG(3, 4)), 3, 20))
 	proxy, proxied := testdb.NewProxy(t, url)
-	repo := processing.New(testdb.Pool(t, proxied), testdb.Logger())
-
-	breakMidway := func(es []domain.InboxEntry) domain.BatchResult {
-		proxy.Stop() // after the claim, before the updates
-		return domain.Fold(es)
+	breaker := &stopAfterClaim{proxy: proxy}
+	cfg, err := postgres.PoolConfig(proxied)
+	if err != nil {
+		t.Fatal(err)
 	}
-	_, err := repo.ProcessBatch(context.Background(), 1000, breakMidway)
+	cfg.ConnConfig.Tracer = breaker
+	traced, err := postgres.ConnectConfig(context.Background(), cfg, 10*time.Second, testdb.Logger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(traced.Close)
+	repo := processing.New(traced, testdb.Logger())
+
+	breaker.armed.Store(true)
+	_, err = repo.ProcessBatch(context.Background(), 1000)
+	if breaker.armed.Load() {
+		t.Fatal("proxy was not stopped after the claim")
+	}
 	if !errors.Is(err, processor.ErrUnavailable) {
 		t.Fatalf("err = %v, want ErrUnavailable", err)
 	}
@@ -89,7 +117,7 @@ func TestBatchInterruptedMidwayIsReappliedOnce(t *testing.T) {
 
 	proxy.Start()
 	for {
-		n, err := repo.ProcessBatch(context.Background(), 1000, domain.Fold)
+		n, err := repo.ProcessBatch(context.Background(), 1000)
 		if err != nil && !errors.Is(err, processor.ErrUnavailable) {
 			t.Fatal(err)
 		}
@@ -149,7 +177,7 @@ func TestBatchKilledBeforeCommitIsRolledBack(t *testing.T) {
 	repo = processing.New(traced, testdb.Logger())
 
 	killer.armed.Store(true)
-	_, err = repo.ProcessBatch(ctx, 1000, domain.Fold)
+	_, err = repo.ProcessBatch(ctx, 1000)
 	if killer.err != nil || killer.armed.Load() {
 		t.Fatalf("session was not terminated before COMMIT: armed=%v err=%v", killer.armed.Load(), killer.err)
 	}
@@ -165,10 +193,10 @@ func TestBatchKilledBeforeCommitIsRolledBack(t *testing.T) {
 			rocketA, testdb.LoadRocket(t, p, "c").Speed, unprocessed(t, p))
 	}
 
-	if n, err := repo.ProcessBatch(ctx, 1000, domain.Fold); err != nil || n != 2 {
+	if n, err := repo.ProcessBatch(ctx, 1000); err != nil || n != 2 {
 		t.Fatalf("re-run: n=%d err=%v, want 2", n, err)
 	}
-	if n, err := repo.ProcessBatch(ctx, 1000, domain.Fold); err != nil || n != 0 {
+	if n, err := repo.ProcessBatch(ctx, 1000); err != nil || n != 0 {
 		t.Fatalf("after re-run: n=%d err=%v, want nothing left", n, err)
 	}
 	if testdb.LoadRocket(t, p, "c").Speed != 105 || testdb.LoadRocket(t, p, "a").Speed != 1 {
@@ -212,11 +240,11 @@ func TestStuckTransactionLosesItsClaim(t *testing.T) {
 	// The stuck "processor" now does nothing.
 
 	repo := processing.New(testdb.Pool(t, url), testdb.Logger())
-	if n, err := repo.ProcessBatch(ctx, 1000, domain.Fold); err != nil || n != 0 {
+	if n, err := repo.ProcessBatch(ctx, 1000); err != nil || n != 0 {
 		t.Fatalf("claimed entries locked by the stuck session: n=%d err=%v", n, err)
 	}
 	time.Sleep(1500 * time.Millisecond) // > idle_in_transaction_session_timeout
-	if n, err := repo.ProcessBatch(ctx, 1000, domain.Fold); err != nil || n != 20 {
+	if n, err := repo.ProcessBatch(ctx, 1000); err != nil || n != 20 {
 		t.Fatalf("after the timeout: n=%d err=%v, want 20", n, err)
 	}
 	if err := stuck.Commit(ctx); err == nil {
@@ -232,7 +260,7 @@ func TestBlockedOnRocketRowBacksOff(t *testing.T) {
 	ctx := context.Background()
 	testdb.InsertEntry(t, p, "c", 1, domain.TypeLaunched, `{"type":"A","launchSpeed":1,"mission":"M"}`)
 	repo := processing.New(limitedPool(t, url, postgres.SessionLimits{IdleInTransaction: 30 * time.Second, Statement: 30 * time.Second, Lock: 300 * time.Millisecond}), testdb.Logger())
-	if _, err := repo.ProcessBatch(ctx, 10, domain.Fold); err != nil {
+	if _, err := repo.ProcessBatch(ctx, 10); err != nil {
 		t.Fatal(err)
 	}
 	testdb.InsertEntry(t, p, "c", 2, domain.TypeSpeedIncreased, `{"by":5}`)
@@ -244,7 +272,7 @@ func TestBlockedOnRocketRowBacksOff(t *testing.T) {
 	if _, err := holder.Exec(ctx, `select 1 from rockets where channel = 'c' for update`); err != nil {
 		t.Fatal(err)
 	}
-	_, err = repo.ProcessBatch(ctx, 10, domain.Fold)
+	_, err = repo.ProcessBatch(ctx, 10)
 	if !errors.Is(err, processor.ErrUnavailable) {
 		t.Fatalf("err = %v, want ErrUnavailable after lock_timeout", err)
 	}
@@ -252,7 +280,7 @@ func TestBlockedOnRocketRowBacksOff(t *testing.T) {
 		t.Fatal("entry was marked although its batch gave up")
 	}
 	_ = holder.Rollback(ctx)
-	if n, err := repo.ProcessBatch(ctx, 10, domain.Fold); err != nil || n != 1 {
+	if n, err := repo.ProcessBatch(ctx, 10); err != nil || n != 1 {
 		t.Fatalf("after release: n=%d err=%v", n, err)
 	}
 	if testdb.LoadRocket(t, p, "c").Speed != 6 {
@@ -274,7 +302,7 @@ func TestRedeliveryOfProcessedMessageIsDroppedAtIntake(t *testing.T) {
 		t.Fatal("first delivery not accepted")
 	}
 	repo := processing.New(p, testdb.Logger())
-	if _, err := repo.ProcessBatch(context.Background(), 10, domain.Fold); err != nil {
+	if _, err := repo.ProcessBatch(context.Background(), 10); err != nil {
 		t.Fatal(err)
 	}
 	if post() != http.StatusAccepted {
@@ -317,7 +345,7 @@ func TestInvalidChannelIsQuarantinedAfterIntake(t *testing.T) {
 	}
 
 	repo := processing.New(p, testdb.Logger())
-	if n, err := repo.ProcessBatch(ctx, 10, domain.Fold); err != nil || n != 3 {
+	if n, err := repo.ProcessBatch(ctx, 10); err != nil || n != 3 {
 		t.Fatalf("processed n=%d err=%v, want 3 entries", n, err)
 	}
 	var outcome, reason string
