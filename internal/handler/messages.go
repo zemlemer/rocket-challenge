@@ -21,6 +21,10 @@ const saveTimeout = 10 * time.Second
 type Messages struct {
 	Repo InboxRepository
 	Log  *slog.Logger
+	// Work is the server-lifetime context inserts run on. It is cancelled
+	// only when the server gives up on in-flight work; nil means
+	// context.Background().
+	Work context.Context
 }
 
 func (h *Messages) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -42,8 +46,13 @@ func (h *Messages) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Detach from the client: once the body is read, finishing the insert is
-	// harmless (identity dedup) and avoids an ambiguous half-done save.
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), saveTimeout)
+	// harmless (identity dedup) and avoids an ambiguous half-done save. Only
+	// the server ends it, when its shutdown timeout expires.
+	work := h.Work
+	if work == nil {
+		work = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(work, saveTimeout)
 	defer cancel()
 	if err := h.Repo.Save(ctx, entry); err != nil {
 		if errors.Is(err, ErrUnavailable) {

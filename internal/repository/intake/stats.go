@@ -27,12 +27,9 @@ const (
 		       count(*) filter (where processed_at is null),
 		       count(*) filter (where outcome = 'applied'),
 		       count(*) filter (where outcome = 'quarantined'),
-		       count(*) filter (where outcome = 'failed')
+		       count(*) filter (where outcome = 'failed'),
+		       min(received_at) filter (where processed_at is null)
 		from inbox`
-
-	// Ids grow with arrival; the partial index makes this one index probe.
-	statsOldestPending = `
-		select received_at from inbox where processed_at is null order by id limit 1`
 
 	statsChannels = `
 		select channel,
@@ -57,13 +54,10 @@ func (r *Stats) Stats(ctx context.Context) (handler.StatsSnapshot, error) {
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 
 	in := &s.Inbox
-	if err := tx.QueryRow(ctx, statsTotals).Scan(&s.AsOf, &in.Received, &in.Pending, &in.Applied, &in.Quarantined, &in.Failed); err != nil {
+	// The oldest pending entry is the earliest received_at, read in the same
+	// scan as the counts; id order need not match receive order.
+	if err := tx.QueryRow(ctx, statsTotals).Scan(&s.AsOf, &in.Received, &in.Pending, &in.Applied, &in.Quarantined, &in.Failed, &in.OldestPendingAt); err != nil {
 		return s, classify("read stats", err)
-	}
-	if in.Pending > 0 {
-		if err := tx.QueryRow(ctx, statsOldestPending).Scan(&in.OldestPendingAt); err != nil {
-			return s, classify("read stats", err)
-		}
 	}
 	rows, err := tx.Query(ctx, statsChannels)
 	if err != nil {
