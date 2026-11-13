@@ -14,7 +14,7 @@ func Classify(e InboxEntry) (Message, error) {
 		return Message{}, reject("body: truncated")
 	case e.Channel == nil || e.MessageNumber == nil:
 		return Message{}, reject("metadata: channel and messageNumber required")
-	case !validChannel(*e.Channel):
+	case !ValidChannel(*e.Channel):
 		return Message{}, reject("metadata.channel: must contain only ASCII letters, digits, '-' or '_' (1 to 255 bytes)")
 	case e.MessageTime == nil:
 		return Message{}, reject("metadata.messageTime: required")

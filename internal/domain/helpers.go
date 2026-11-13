@@ -9,22 +9,6 @@ import (
 
 func sprintf(format string, args ...any) string { return fmt.Sprintf(format, args...) }
 
-func validChannel(channel string) bool {
-	if len(channel) == 0 || len(channel) > helpers.MaxStringBytes {
-		return false
-	}
-	for i := 0; i < len(channel); i++ {
-		c := channel[i]
-		switch {
-		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z',
-			c >= '0' && c <= '9', c == '-', c == '_':
-		default:
-			return false
-		}
-	}
-	return true
-}
-
 // stringField reads a non-empty string of at most 255 bytes without NUL.
 func stringField(name string, set func(*Message, string)) field {
 	return field{name, func(m *Message, raw json.RawMessage) error {

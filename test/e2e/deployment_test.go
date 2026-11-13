@@ -357,6 +357,7 @@ func TestSimulatorDefaultRun(t *testing.T) {
 		t.Fatalf("inbox: %d rows, %d distinct identities, %d without identity; simulator sent %d", rows, distinct, anonymous, res.sent)
 	}
 	assertStateMatchesInbox(t)
+	assertAPIMatchesState(t)
 }
 
 // Spec deployment "One processor stopped": the others keep processing and
@@ -366,4 +367,5 @@ func TestSimulatorWithProcessorStopped(t *testing.T) {
 	t.Cleanup(func() { run(t, "docker", "start", victim) })
 	simulate(t, func() { run(t, "docker", "stop", victim) })
 	assertStateMatchesInbox(t)
+	assertAPIMatchesState(t)
 }

@@ -17,6 +17,8 @@ import (
 type Handlers struct {
 	Messages http.Handler // POST /messages
 	Health   http.Handler // GET /healthz
+	Rockets  http.Handler // GET /rockets
+	Rocket   http.Handler // GET /rockets/{channel}
 }
 
 // Routes returns the router. Unknown paths get a JSON 404, known paths with
@@ -27,6 +29,10 @@ func Routes(h Handlers) http.Handler {
 	mux.Handle("/messages", methodNotAllowed("POST"))
 	mux.Handle("GET /healthz", h.Health)
 	mux.Handle("/healthz", methodNotAllowed("GET, HEAD"))
+	mux.Handle("GET /rockets", h.Rockets)
+	mux.Handle("/rockets", methodNotAllowed("GET, HEAD"))
+	mux.Handle("GET /rockets/{channel}", h.Rocket)
+	mux.Handle("/rockets/{channel}", methodNotAllowed("GET, HEAD"))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteError(w, http.StatusNotFound, "not found: "+r.URL.Path)
 	})
