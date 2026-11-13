@@ -23,7 +23,9 @@ Observed in the code before this change:
 
 ### D1. Rollback with its own timeout
 
-`process` defers the rollback with `context.WithTimeout(context.WithoutCancel(ctx), rollbackTimeout)`, `rollbackTimeout = 2 s` (a constant of the processing package). Detaching keeps the attempt alive when the batch context has already expired; the timeout makes pgx (v5.13, default `DeadlineContextWatcherHandler`) set a deadline on the socket, so a hung `ROLLBACK` returns with an error and the connection is closed and released to the pool, which destroys it. PostgreSQL rolls the transaction back when it notices the closed connection; nothing was committed either way.
+`process` defers the rollback with `context.WithTimeout(context.WithoutCancel(ctx), rollbackTimeout)`, `rollbackTimeout = 2 s` (a constant of the processing package). Detaching keeps the attempt alive when the batch context has already expired; the timeout makes pgx (v5.13, default `DeadlineContextWatcherHandler`) set a deadline on the socket, so a hung `ROLLBACK` returns with an error and the connection is released to the pool, which destroys it. PostgreSQL rolls the transaction back when it notices the closed connection; nothing was committed either way.
+
+pgx closes such a connection in the background (`PgConn.asyncClose`): it sends a cancel request over a new connection, sends `Terminate` and drains the socket, bounded by a fixed 15 s, and pgxpool's destructor waits for that. While the network stays hung, `pool.Close()` therefore blocks for up to 15 s; D2 bounds that wait.
 
 A batch therefore holds a connection for at most `batchTimeout + rollbackTimeout` = 12 s, which fits the 15 s budget. In the one-by-one fallback each entry has its own rollback bound, but all entries share the batch context, so once it expires no new transaction begins.
 
@@ -40,11 +42,11 @@ After the signal `ProcessorCmd.Run` hands over to `shutdown(done, closePool, bud
 ## Risks / Trade-offs
 
 - [Server-side transaction stays open while the network hangs] After the rollback timeout the client has given up, but a backend behind a hung network still holds the transaction and its row locks until it notices the connection is gone (keepalive or `idle_in_transaction_session_timeout`, 30 s). → Accepted: nothing is committed; other processors skip the locked inbox rows and wait at most `lock_timeout` for rocket rows. Same as any client crash.
-- [Exit status 0 after a failed rollback] A rollback that timed out counts as "rolled back": the connection is closed without a commit. → Accepted: the batch is applied exactly once after recovery, which the test checks.
+- [Exit status 1 when the network hangs] The batch gives up its connection within the budget, but pgx's background close of that connection (see D1) keeps `pool.Close()` busy past the budget, so the processor exits with status 1. → Accepted: the status tells the operator the shutdown was not clean; nothing was committed and the batch is applied exactly once after recovery, which the test checks. A status 0 here would need closing pgx connections without its background cleanup.
 - [Budget includes the batch] A batch that uses its full 10 s plus rollback leaves 3 s for the pool close. → Enough: closing idle connections only writes a `Terminate` message.
 
 ## Verification
 
-- Integration test: a row lock held by the test makes the batch fail with `lock_timeout`; the test proxy freezes all traffic as soon as the processor sends `rollback` and keeps it frozen until the process has exited. After `SIGTERM` the process exits with status 0 within the 15 s budget. After the network is restored and the lock released, a second processor run applies the batch exactly once (state equals the reference fold of the inbox).
+- Integration test: a row lock held by the test makes the batch fail with `lock_timeout`; the test proxy freezes all traffic as soon as the processor sends `rollback` and keeps it frozen until the process has exited. After `SIGTERM` the process exits within the 15 s budget with status 1 and `shutdown was not clean: database pool still not closed` — so the loop returned in time and only the pool close blocked. With the old unbounded rollback the same test fails with `batch still running` (checked by reverting D1 locally). After the network is restored and the lock released, a second processor run applies the batch exactly once (state equals the reference fold of the inbox).
 - Unit test: with the loop done and a pool close that blocks, `shutdown` returns `shutdown was not clean` after the budget; with a loop that does not finish, the same; with both done in time, nil.
-- Not tested: a real `pool.Close()` that blocks; that branch is covered by the unit test with a blocking function.
+- The integration test also exercises a real blocking `pool.Close()`; the unit test covers the branches exactly, independent of pgx internals.

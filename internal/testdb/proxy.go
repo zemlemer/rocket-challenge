@@ -1,7 +1,7 @@
 package testdb
 
 import (
-	"io"
+	"bytes"
 	"net"
 	"net/url"
 	"sync"
@@ -9,15 +9,20 @@ import (
 )
 
 // Proxy is a TCP proxy in front of the test database that can be stopped and
-// started again on the same address, to simulate a database outage.
+// started again on the same address, to simulate a database outage. It can
+// also freeze: stop forwarding without closing anything, to simulate a hung
+// network.
 type Proxy struct {
 	t        testing.TB
 	addr     string
 	upstream string
 
-	mu    sync.Mutex
-	l     net.Listener
-	conns map[net.Conn]struct{}
+	mu       sync.Mutex
+	l        net.Listener
+	conns    map[net.Conn]struct{}
+	freezeOn []byte        // pattern in client traffic that triggers a freeze
+	frozen   chan struct{} // closed when the freeze triggers
+	thaw     chan struct{} // closed when a triggered freeze ends
 }
 
 // NewProxy starts a proxy to the database in dbURL and returns it together
@@ -40,10 +45,29 @@ func NewProxy(t testing.TB, dbURL string) (*Proxy, string) {
 	return p, u.String()
 }
 
-// Stop closes the listener and every proxied connection.
+// FreezeOn arms a freeze: as soon as a client sends bytes containing
+// pattern, the proxy stops forwarding in both directions on every connection,
+// including new ones, without closing any of them; the bytes that contain
+// the pattern are not forwarded either. The freeze lasts until Stop. The
+// returned channel is closed when the freeze triggers.
+func (p *Proxy) FreezeOn(pattern string) <-chan struct{} {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.freezeOn = []byte(pattern)
+	p.frozen = make(chan struct{})
+	p.thaw = nil
+	return p.frozen
+}
+
+// Stop ends a freeze, closes the listener and every proxied connection.
 func (p *Proxy) Stop() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.freezeOn = nil
+	if p.thaw != nil {
+		close(p.thaw)
+		p.thaw = nil
+	}
 	if p.l != nil {
 		_ = p.l.Close()
 		p.l = nil
@@ -82,8 +106,42 @@ func (p *Proxy) serve(l net.Listener) {
 			p.mu.Lock()
 			p.conns[c], p.conns[up] = struct{}{}, struct{}{}
 			p.mu.Unlock()
-			go func() { _, _ = io.Copy(up, c); _ = up.Close() }()
-			go func() { _, _ = io.Copy(c, up); _ = c.Close() }()
+			go p.pipe(up, c, true)
+			go p.pipe(c, up, false)
 		}
 	}()
+}
+
+// pipe copies src to dst until either fails, holding every chunk while the
+// proxy is frozen. Client traffic (fromClient) is checked for the pattern.
+func (p *Proxy) pipe(dst, src net.Conn, fromClient bool) {
+	defer func() { _ = dst.Close() }()
+	buf := make([]byte, 32<<10)
+	for {
+		n, err := src.Read(buf)
+		if n > 0 {
+			if thaw := p.hold(buf[:n], fromClient); thaw != nil {
+				<-thaw
+				return // a freeze ends only with Stop, which closes the connections
+			}
+			if _, werr := dst.Write(buf[:n]); werr != nil {
+				return
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+// hold reports the channel to wait on if chunk must not be forwarded now:
+// the proxy is frozen, or chunk triggers the freeze.
+func (p *Proxy) hold(chunk []byte, fromClient bool) <-chan struct{} {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.thaw == nil && fromClient && p.freezeOn != nil && bytes.Contains(chunk, p.freezeOn) {
+		p.thaw = make(chan struct{})
+		close(p.frozen)
+	}
+	return p.thaw
 }

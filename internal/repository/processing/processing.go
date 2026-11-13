@@ -4,6 +4,7 @@ package processing
 import (
 	"context"
 	"log/slog"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -12,6 +13,12 @@ import (
 	"rockets/internal/postgres"
 	"rockets/internal/processor"
 )
+
+// rollbackTimeout bounds the rollback of a failed transaction. A rollback
+// takes milliseconds; the bound matters only when the connection hangs, and
+// it keeps a batch within the processor's shutdown budget (design D1 of
+// bound-processor-shutdown).
+const rollbackTimeout = 2 * time.Second
 
 // Repository applies inbox entries to rocket state.
 type Repository struct {
@@ -67,7 +74,12 @@ func (r *Repository) process(ctx context.Context, id *int64, limit int, fold fun
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	defer func() {
+		// Detached: the rollback is attempted even when ctx has expired.
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rollbackTimeout)
+		defer cancel()
+		_ = tx.Rollback(rctx)
+	}()
 
 	entries, err := claim(ctx, tx, id, limit)
 	if err != nil {
