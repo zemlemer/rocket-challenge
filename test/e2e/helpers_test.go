@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -88,16 +89,62 @@ func containers(t *testing.T, service string) []string {
 // written since `since` whose request contains marker.
 func nginxUpstreams(t *testing.T, since time.Time, marker string) []string {
 	t.Helper()
+	logs := compose(t, "logs", "--no-log-prefix", "--since", since.UTC().Format(time.RFC3339), "nginx")
+	return parseUpstreams(logs, marker, false)
+}
+
+// parseUpstreams extracts the upstream address of each access-log line in logs
+// whose request contains marker. With servedOnly, it keeps only lines answered
+// 200 by a single upstream (no retry).
+func parseUpstreams(logs, marker string, servedOnly bool) []string {
 	var ups []string
-	for _, line := range strings.Split(compose(t, "logs", "--no-log-prefix", "--since", since.UTC().Format(time.RFC3339), "nginx"), "\n") {
+	for _, line := range strings.Split(logs, "\n") {
 		if !strings.Contains(line, marker) {
 			continue
 		}
-		if i := strings.Index(line, "upstream="); i >= 0 {
-			ups = append(ups, strings.Fields(line[i+len("upstream="):])[0])
+		i := strings.Index(line, "upstream=")
+		if i < 0 {
+			continue
 		}
+		up := strings.Fields(line[i+len("upstream="):])[0]
+		if servedOnly && (!strings.Contains(line, "upstream_status=200 ") || strings.HasSuffix(up, ",")) {
+			continue
+		}
+		ups = append(ups, up)
 	}
 	return ups
+}
+
+// entryPointReachesAllReplicas sends a burst of requests through nginx and
+// reports whether they were served by as many distinct upstreams as there are
+// server containers. Containers being up is not enough: after a rebuild nginx
+// may still hold a DNS answer (valid=5s) without the new replicas, or have
+// disabled a replica (fail_timeout=5s) that refused a connection while starting.
+func entryPointReachesAllReplicas() bool {
+	out, err := exec.Command("docker", "compose", "ps", "-q", "server").Output()
+	replicas := len(strings.Fields(string(out)))
+	if err != nil || replicas == 0 {
+		return false
+	}
+	since := time.Now().Add(-time.Second)
+	marker := "ready=" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	for range 10 * replicas {
+		resp, err := http.Get(baseURL + "/healthz?" + marker)
+		if err != nil {
+			return false
+		}
+		_ = resp.Body.Close()
+	}
+	logs, err := exec.Command("docker", "compose", "logs", "--no-log-prefix",
+		"--since", since.UTC().Format(time.RFC3339), "nginx").Output()
+	if err != nil {
+		return false
+	}
+	seen := map[string]bool{}
+	for _, u := range parseUpstreams(string(logs), marker, true) {
+		seen[u] = true
+	}
+	return len(seen) == replicas
 }
 
 func db(t *testing.T) *pgx.Conn {

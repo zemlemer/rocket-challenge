@@ -21,12 +21,14 @@ var (
 	root    = repoRoot()
 )
 
-// TestMain waits until the entry point answers and every server replica is
-// listening. Waiting for /healthz alone is not enough: it succeeds as soon as
-// one replica is up, while the others may still be starting after a rebuild.
+// TestMain waits until the entry point answers, every server replica is
+// listening, and requests through nginx reach every replica. Waiting for
+// /healthz alone is not enough: it succeeds as soon as one replica is up,
+// while the others may still be starting after a rebuild. Waiting for the
+// containers is not enough either: nginx may not route to all of them yet.
 func TestMain(m *testing.M) {
 	deadline := time.Now().Add(60 * time.Second)
-	for !entryPointHealthy() || !allReplicasListening() {
+	for !entryPointHealthy() || !allReplicasListening() || !entryPointReachesAllReplicas() {
 		if time.Now().After(deadline) {
 			fmt.Fprintf(os.Stderr, "e2e: stack not ready at %s (start it with `docker compose up --build -d`)\n", baseURL)
 			os.Exit(1)
