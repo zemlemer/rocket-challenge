@@ -91,3 +91,14 @@ The docker compose stack SHALL run four `rockets processor` instances that start
 #### Scenario: One processor stopped
 - **WHEN** one of the four processors is stopped while the simulator is sending messages
 - **THEN** the others keep processing and every message is applied exactly once
+
+### Requirement: Read failures are not retried
+The entry point SHALL NOT retry a `503` response to a read request on `/rockets` paths on another instance, because a slow or unavailable database affects every instance alike. It SHALL still retry such a request on another instance when the connection to an instance fails.
+
+#### Scenario: Database paused during a read
+- **WHEN** the database is paused and a client sends `GET /rockets` through `localhost:8088`
+- **THEN** the client gets `503` after one read timeout (about 5 s), not after one timeout per instance
+
+#### Scenario: Intake right after a failed read
+- **WHEN** the database answers again right after that read
+- **THEN** `POST /messages` requests through `localhost:8088` get `202` on every instance
