@@ -77,6 +77,9 @@ docker compose exec postgres psql -U rockets -d rockets -c \
 its own: batch size (1,000 entries per transaction), poll interval for an empty
 inbox (100 ms) and shutdown timeout (15 s) are fixed in
 [internal/processor](internal/processor/processor.go). It serves no HTTP.
+An idle processor therefore makes 10 empty claims per second; measured cost and
+possible optimizations (growing pause, a message broker, LISTEN/NOTIFY) are in
+[docs/performance-notes.md](docs/performance-notes.md).
 
 Each batch is one transaction: claim the oldest unprocessed entries
 (`FOR UPDATE SKIP LOCKED`, so processors never take the same entry), validate
