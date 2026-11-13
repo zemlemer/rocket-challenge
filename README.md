@@ -3,6 +3,38 @@
 Backend for the rockets challenge (task: [docs/challenge.md](docs/challenge.md)).
 Requirements and design live in [openspec/](openspec/).
 
+## Quick start
+
+Requires Docker with Compose, `make` and `curl`.
+
+```sh
+make up
+```
+
+One command builds the image and starts the whole stack (PostgreSQL,
+migrations, 3 servers, 4 processors, nginx), then waits until the API answers
+on `http://localhost:8088`.
+
+Run the simulator from the challenge ZIP, from wherever it is, against the
+stack:
+
+```sh
+/path/to/rockets-simulator launch "http://localhost:8088/messages"
+```
+
+Watch the progress and read the rockets:
+
+```sh
+curl -s localhost:8088/stats
+curl -s localhost:8088/rockets
+```
+
+`make logs` follows all services' logs, `make ps` lists the containers, and
+`make down` stops the stack (the database volume and its data are kept).
+Details: [Running the stack](#running-the-stack).
+
+## The executable
+
 The system is a single executable, `rockets`, whose mode is chosen by a
 subcommand:
 
@@ -23,10 +55,8 @@ mode failed, `2` invalid invocation.
 
 ## Running the stack
 
-```sh
-docker compose up --build -d
-curl localhost:8088/healthz
-```
+`make up` runs `docker compose up --build -d` and waits up to 60 s for
+`/healthz` through nginx; on a timeout it lists the containers and fails.
 
 | Service | What it does |
 |---|---|
@@ -36,12 +66,9 @@ curl localhost:8088/healthz
 | `processor` ×4 | `rockets processor`, start after PostgreSQL is healthy and `migrate` succeeded, no ports |
 | `nginx` | entry point on `localhost:8088`, round-robin over the servers, retries a failed request on another replica |
 
-Point the provided simulator (the binary from the challenge ZIP; keep it as
-`tools/rockets-simulator`, which is gitignored) at it:
-
-```sh
-./tools/rockets-simulator launch "http://localhost:8088/messages"
-```
+The simulator (see [Quick start](#quick-start)) can run from any directory.
+Only the E2E tests look for it in a fixed place, `tools/rockets-simulator`
+(gitignored), unless `ROCKETS_SIMULATOR` names another path (see [Tests](#tests)).
 
 ## Server mode
 

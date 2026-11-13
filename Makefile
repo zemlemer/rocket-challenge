@@ -2,7 +2,10 @@ ROCKETS_PG_PORT ?= 15432
 TEST_DATABASE_URL ?= postgres://rockets:rockets@localhost:$(ROCKETS_PG_PORT)/rockets?sslmode=disable
 export ROCKETS_PG_PORT
 
-.PHONY: build test test-integration test-e2e lint db-up db-down
+ROCKETS_URL ?= http://localhost:8088
+
+.PHONY: build test test-integration test-e2e lint db-up db-down \
+	up down logs ps
 
 build:
 	go build -o bin/rockets ./cmd/rockets
@@ -36,3 +39,24 @@ db-up:
 
 db-down:
 	docker compose down
+
+# Whole stack (PostgreSQL, migrations, servers, processors, nginx) in Docker;
+# returns once the API answers on $(ROCKETS_URL).
+up:
+	docker compose up --build -d
+	@printf 'waiting for $(ROCKETS_URL)/healthz'; \
+	for i in $$(seq 60); do \
+		if curl -fs $(ROCKETS_URL)/healthz >/dev/null; then echo ' ok'; exit 0; fi; \
+		printf '.'; sleep 1; \
+	done; \
+	echo ' timed out'; docker compose ps -a; exit 1
+
+# Stops the stack; the database volume and its data are kept.
+down:
+	docker compose down
+
+logs:
+	docker compose logs -f --tail=100
+
+ps:
+	docker compose ps -a
