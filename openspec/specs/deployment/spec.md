@@ -80,3 +80,14 @@ With the stack running, the provided simulator run on the host with `./rockets l
 #### Scenario: Default simulator run
 - **WHEN** the simulator runs with default options against the stack
 - **THEN** every request is answered with `2xx` and the inbox holds one entry per distinct message identity the simulator sent
+
+### Requirement: Processor replicas
+The docker compose stack SHALL run four `rockets processor` instances that start only after PostgreSQL is healthy and `migrate` has completed successfully, publish no ports on the host, restart automatically after a crash, and get a stop grace period longer than their shutdown timeout.
+
+#### Scenario: Stack start
+- **WHEN** `docker compose up` is run on a fresh volume
+- **THEN** four processor instances start after `migrate` and log that they started
+
+#### Scenario: One processor stopped
+- **WHEN** one of the four processors is stopped while the simulator is sending messages
+- **THEN** the others keep processing and every message is applied exactly once
