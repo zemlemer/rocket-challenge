@@ -290,7 +290,7 @@ unavailable or slower than 5 s (not retried by nginx), `500` otherwise.
 ## Database migrations
 
 Migrations are forward-only SQL files in
-[internal/postgres/migrations](internal/postgres/migrations/), embedded into the
+[data/migrations](data/migrations/), embedded into the
 executable. `rockets migrate` applies the missing ones in version order; it is
 safe to re-run and to run concurrently.
 

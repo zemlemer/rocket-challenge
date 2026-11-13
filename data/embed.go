@@ -1,4 +1,5 @@
-package postgres
+// Package data holds files embedded into the rockets executable.
+package data
 
 import (
 	"embed"

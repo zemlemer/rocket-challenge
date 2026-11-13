@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 
+	"rockets/data"
 	"rockets/internal/postgres"
 )
 
@@ -20,7 +21,7 @@ func (c *MigrateCmd) Run(ctx context.Context, g *Globals, log *slog.Logger) erro
 	}
 	defer pool.Close()
 
-	res, err := postgres.Migrate(ctx, pool, postgres.Migrations(), log)
+	res, err := postgres.Migrate(ctx, pool, data.Migrations(), log)
 	if err != nil {
 		return err
 	}

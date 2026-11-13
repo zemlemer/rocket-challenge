@@ -4,4 +4,4 @@ bin
 openspec
 docs
 *.md
-!internal/postgres/migrations/README.md
+!data/migrations/README.md

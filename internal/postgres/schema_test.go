@@ -6,12 +6,13 @@ import (
 	"testing"
 	"testing/fstest"
 
+	"rockets/data"
 	"rockets/internal/postgres"
 	"rockets/internal/testdb"
 )
 
 func TestLatestVersionOfEmbeddedSet(t *testing.T) {
-	v, err := postgres.LatestVersion(postgres.Migrations())
+	v, err := postgres.LatestVersion(data.Migrations())
 	if err != nil || v < 1 {
 		t.Fatalf("LatestVersion = %d, %v; want ≥ 1", v, err)
 	}
@@ -19,7 +20,7 @@ func TestLatestVersionOfEmbeddedSet(t *testing.T) {
 
 func TestRequireSchema(t *testing.T) {
 	ctx := context.Background()
-	latest, _ := postgres.LatestVersion(postgres.Migrations())
+	latest, _ := postgres.LatestVersion(data.Migrations())
 
 	t.Run("unmigrated", func(t *testing.T) {
 		pool := testdb.Pool(t, testdb.New(t))

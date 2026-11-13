@@ -9,6 +9,7 @@ import (
 	"os"
 	"time"
 
+	"rockets/data"
 	"rockets/internal/handler"
 	"rockets/internal/postgres"
 	"rockets/internal/repository"
@@ -34,7 +35,7 @@ func (c *ServerCmd) Run(ctx context.Context, g *Globals, log *slog.Logger) error
 	}
 	defer pool.Close()
 
-	required, err := postgres.LatestVersion(postgres.Migrations())
+	required, err := postgres.LatestVersion(data.Migrations())
 	if err != nil {
 		return err
 	}
