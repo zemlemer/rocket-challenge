@@ -1,10 +1,15 @@
 package server_test
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"rockets/internal/server"
 )
@@ -92,5 +97,68 @@ func TestRocketRoutePathHandling(t *testing.T) {
 		if rec.Header().Get("Allow") != "GET, HEAD" {
 			t.Errorf("%s: Allow = %q", path, rec.Header().Get("Allow"))
 		}
+	}
+}
+
+// On shutdown timeout Run calls abort, closes the connections and returns
+// ErrUncleanShutdown.
+func TestRunAbortsWorkAfterShutdownTimeout(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inHandler := make(chan struct{})
+	release := make(chan struct{})
+	defer close(release)
+	routes := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		close(inHandler)
+		<-release
+	})
+	ctx, stop := context.WithCancel(context.Background())
+	aborted := make(chan struct{})
+	errc := make(chan error, 1)
+	go func() {
+		errc <- server.Run(ctx, l, routes, 200*time.Millisecond, func() { close(aborted) }, slog.New(slog.DiscardHandler))
+	}()
+
+	clientErr := make(chan error, 1)
+	go func() {
+		resp, err := http.Get("http://" + l.Addr().String() + "/")
+		if err == nil {
+			_ = resp.Body.Close()
+		}
+		clientErr <- err
+	}()
+	<-inHandler
+	stop()
+
+	select {
+	case err := <-errc:
+		if !errors.Is(err, server.ErrUncleanShutdown) {
+			t.Fatalf("Run = %v, want ErrUncleanShutdown", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after the shutdown timeout")
+	}
+	select {
+	case <-aborted:
+	default:
+		t.Fatal("abort not called")
+	}
+	if err := <-clientErr; err == nil {
+		t.Fatal("client got a response; connection should have been closed")
+	}
+}
+
+func TestRunCleanShutdownDoesNotAbort(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, stop := context.WithCancel(context.Background())
+	stop()
+	abort := func() { t.Error("abort called on a clean shutdown") }
+	if err := server.Run(ctx, l, http.NotFoundHandler(), time.Second, abort, slog.New(slog.DiscardHandler)); err != nil {
+		t.Fatalf("Run = %v, want nil", err)
 	}
 }

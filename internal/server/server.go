@@ -42,10 +42,15 @@ func Routes(h Handlers) http.Handler {
 	return mux
 }
 
+// ErrUncleanShutdown is wrapped by the error Run returns when requests were
+// still in flight after the shutdown timeout.
+var ErrUncleanShutdown = errors.New("shutdown was not clean")
+
 // Run serves on l until ctx is cancelled, then shuts down gracefully: no new
 // connections, in-flight requests finish within shutdownTimeout. If they do
-// not, the remaining connections are closed and an error is returned.
-func Run(ctx context.Context, l net.Listener, routes http.Handler, shutdownTimeout time.Duration, log *slog.Logger) error {
+// not, abort (if not nil) is called to cancel their remaining work, the
+// connections are closed and an error wrapping ErrUncleanShutdown is returned.
+func Run(ctx context.Context, l net.Listener, routes http.Handler, shutdownTimeout time.Duration, abort func(), log *slog.Logger) error {
 	srv := &http.Server{
 		Handler:           routes,
 		ReadHeaderTimeout: 5 * time.Second,
@@ -67,8 +72,11 @@ func Run(ctx context.Context, l net.Listener, routes http.Handler, shutdownTimeo
 	sctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	if err := srv.Shutdown(sctx); err != nil {
+		if abort != nil {
+			abort()
+		}
 		_ = srv.Close()
-		return fmt.Errorf("shutdown was not clean: requests still in flight after %s: %w", shutdownTimeout, err)
+		return fmt.Errorf("%w: requests still in flight after %s: %w", ErrUncleanShutdown, shutdownTimeout, err)
 	}
 	if err := <-errc; !errors.Is(err, http.ErrServerClosed) {
 		return err

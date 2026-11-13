@@ -136,6 +136,31 @@ func inboxCount(t *testing.T, url string) int {
 	return n
 }
 
+// waitForLockWait waits until a backend other than the caller's waits on a
+// lock, i.e. the server's insert is blocked.
+func waitForLockWait(t *testing.T, url string) {
+	t.Helper()
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close(ctx) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var n int
+		if err := conn.QueryRow(ctx, `select count(*) from pg_stat_activity
+			where datname = current_database() and wait_event_type = 'Lock'`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n > 0 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("no insert waits on the lock")
+}
+
 const testMessage = `{"metadata":{"channel":"c1","messageNumber":1,"messageTime":"2022-02-02T19:39:05.86337+01:00","messageType":"RocketLaunched"},"message":{"type":"Falcon-9","launchSpeed":500,"mission":"ARTEMIS"}}`
 
 // rawRequest opens a connection and sends the request head plus part of a body.

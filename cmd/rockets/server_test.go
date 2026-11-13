@@ -2,6 +2,7 @@ package main_test
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +13,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"rockets/internal/testdb"
 )
@@ -172,6 +175,77 @@ func TestShutdownTimeoutExceededExitsWith1(t *testing.T) {
 	}
 	if !strings.Contains(srv.stderr.String(), "shutdown was not clean") {
 		t.Fatalf("stderr lacks the unclean-shutdown message:\n%s", srv.stderr)
+	}
+}
+
+// Spec http-server "Insert blocked in the database": the test holds the lock
+// on the message's identity until the server has exited, so only cancelling
+// the insert and bounding the pool close let the process exit before the
+// 10 s save timeout.
+func TestShutdownCancelsInsertBlockedInDatabase(t *testing.T) {
+	url := migrated(t)
+	ctx := context.Background()
+	lock, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = lock.Close(ctx) }()
+	tx, err := lock.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	// An uncommitted entry with the same identity: the server's insert waits
+	// on the unique index until this transaction ends.
+	if _, err := tx.Exec(ctx, `insert into inbox (channel, message_number, body, truncated) values ('c1', 1, '{}', false)`); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := startServerArgs(t, url, "--shutdown-timeout", "1s")
+	posted := make(chan *http.Response, 1)
+	go func() {
+		resp, err := http.Post("http://"+srv.addr+"/messages", "application/json", strings.NewReader(testMessage))
+		if err != nil {
+			posted <- nil
+			return
+		}
+		_ = resp.Body.Close()
+		posted <- resp
+	}()
+	waitForLockWait(t, url)
+
+	start := time.Now()
+	if err := srv.cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-srv.done:
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+			t.Fatalf("exit = %v, want status 1\n%s", err, srv.stderr)
+		}
+	case <-time.After(8 * time.Second):
+		t.Fatalf("server did not exit while its insert was blocked\n%s", srv.stderr)
+	}
+	elapsed := time.Since(start)
+	if elapsed < time.Second || elapsed > 2*time.Second+500*time.Millisecond {
+		t.Errorf("exited %s after SIGTERM, want between the 1 s timeout and twice it", elapsed)
+	}
+
+	// The lock is still held: the process exited without it being released.
+	var holding bool
+	if err := tx.QueryRow(ctx, `select count(*) = 1 from inbox where channel = 'c1'`).Scan(&holding); err != nil || !holding {
+		t.Fatalf("lock transaction no longer usable after exit: %v", err)
+	}
+	if resp := <-posted; resp != nil && resp.StatusCode == http.StatusAccepted {
+		t.Fatal("client got 202 for an insert that was cancelled")
+	}
+	out := srv.stderr.String()
+	if !strings.Contains(out, "shutdown was not clean") {
+		t.Errorf("stderr lacks the unclean-shutdown message:\n%s", out)
+	}
+	if strings.Contains(out, "pool still not closed") {
+		t.Errorf("pool close hit its bound although the insert was cancelled:\n%s", out)
 	}
 }
 
