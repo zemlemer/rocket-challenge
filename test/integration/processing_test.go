@@ -8,8 +8,12 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"rockets/internal/domain"
 	"rockets/internal/handler"
@@ -94,6 +98,82 @@ func TestBatchInterruptedMidwayIsReappliedOnce(t *testing.T) {
 		}
 	}
 	assertMatchesReference(t, p)
+}
+
+// killBeforeCommit terminates the session that is about to send COMMIT, once
+// armed. It relies on pgx sending COMMIT as a query of its own.
+type killBeforeCommit struct {
+	admin *pgxpool.Pool
+	armed atomic.Bool
+	err   error // of pg_terminate_backend; read after ProcessBatch returns
+}
+
+func (k *killBeforeCommit) TraceQueryStart(ctx context.Context, conn *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+	if strings.EqualFold(strings.TrimSpace(data.SQL), "commit") && k.armed.CompareAndSwap(true, false) {
+		var ok bool
+		// The timeout makes pg_terminate_backend wait until the session is
+		// gone, so COMMIT never reaches it.
+		k.err = k.admin.QueryRow(context.WithoutCancel(ctx), `select pg_terminate_backend($1, 5000)`, conn.PgConn().PID()).Scan(&ok)
+		if k.err == nil && !ok {
+			k.err = errors.New("session not terminated")
+		}
+	}
+	return ctx
+}
+
+func (*killBeforeCommit) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+// Spec "Crash safety", failure at the last moment: the session dies after the
+// batch updated the rockets and marked its entries, right before COMMIT. The
+// batch has no effect, and a re-run applies every entry once.
+func TestBatchKilledBeforeCommitIsRolledBack(t *testing.T) {
+	url, p := testdb.Migrated(t)
+	ctx := context.Background()
+	repo := processing.New(p, testdb.Logger())
+	testdb.InsertEntry(t, p, "c", 1, domain.TypeLaunched, `{"type":"A","launchSpeed":100,"mission":"M"}`)
+	testdb.Drain(t, repo, 10)
+	testdb.InsertEntry(t, p, "a", 1, domain.TypeLaunched, `{"type":"A","launchSpeed":1,"mission":"M"}`)
+	testdb.InsertEntry(t, p, "c", 2, domain.TypeSpeedIncreased, `{"by":5}`)
+
+	killer := &killBeforeCommit{admin: p}
+	cfg, err := postgres.PoolConfig(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.Tracer = killer
+	traced, err := postgres.ConnectConfig(ctx, cfg, 10*time.Second, testdb.Logger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(traced.Close)
+	repo = processing.New(traced, testdb.Logger())
+
+	killer.armed.Store(true)
+	_, err = repo.ProcessBatch(ctx, 1000, domain.Fold)
+	if killer.err != nil || killer.armed.Load() {
+		t.Fatalf("session was not terminated before COMMIT: armed=%v err=%v", killer.armed.Load(), killer.err)
+	}
+	if !errors.Is(err, processor.ErrUnavailable) {
+		t.Fatalf("err = %v, want ErrUnavailable", err)
+	}
+	var rocketA int
+	if err := p.QueryRow(ctx, `select count(*) from rockets where channel = 'a'`).Scan(&rocketA); err != nil {
+		t.Fatal(err)
+	}
+	if rocketA != 0 || testdb.LoadRocket(t, p, "c").Speed != 100 || unprocessed(t, p) != 2 {
+		t.Fatalf("killed batch had an effect: rocket a rows=%d, c speed=%d, unprocessed=%d",
+			rocketA, testdb.LoadRocket(t, p, "c").Speed, unprocessed(t, p))
+	}
+
+	if n, err := repo.ProcessBatch(ctx, 1000, domain.Fold); err != nil || n != 2 {
+		t.Fatalf("re-run: n=%d err=%v, want 2", n, err)
+	}
+	if n, err := repo.ProcessBatch(ctx, 1000, domain.Fold); err != nil || n != 0 {
+		t.Fatalf("after re-run: n=%d err=%v, want nothing left", n, err)
+	}
+	if testdb.LoadRocket(t, p, "c").Speed != 105 || testdb.LoadRocket(t, p, "a").Speed != 1 {
+		t.Fatalf("re-run: a=%+v c=%+v", testdb.LoadRocket(t, p, "a"), testdb.LoadRocket(t, p, "c"))
+	}
 }
 
 // Spec "Recovery from storage outage": a running processor resumes by itself.
