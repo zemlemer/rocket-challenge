@@ -91,37 +91,3 @@ func TestPropertyOrderAndBatchingDoNotMatter(t *testing.T) {
 		}
 	}
 }
-
-// Merge is associative and commutative for at most one explosion.
-func TestPropertyMerge(t *testing.T) {
-	for i := range 1000 {
-		rng := rand.New(rand.NewPCG(uint64(i), 11))
-		es := stream(rng)
-		var parts []domain.Delta
-		for _, e := range es {
-			if *e.Channel != "rocket-0" {
-				continue
-			}
-			res := domain.Fold([]domain.InboxEntry{e})
-			parts = append(parts, res.Deltas...)
-		}
-		if len(parts) < 2 {
-			continue
-		}
-		left := parts[0]
-		for _, p := range parts[1:] {
-			left = domain.Merge(left, p)
-		}
-		rng.Shuffle(len(parts), func(a, b int) { parts[a], parts[b] = parts[b], parts[a] })
-		right := parts[len(parts)-1]
-		for j := len(parts) - 2; j >= 0; j-- {
-			right = domain.Merge(parts[j], right)
-		}
-		var a, b domain.Rocket
-		a.Apply(left)
-		b.Apply(right)
-		if !reflect.DeepEqual(flat(map[string]*domain.Rocket{"x": &a}), flat(map[string]*domain.Rocket{"x": &b})) {
-			t.Fatalf("iteration %d: merge not order-independent", i)
-		}
-	}
-}

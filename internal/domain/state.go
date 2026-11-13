@@ -124,17 +124,6 @@ func (d *Delta) add(entryID int64, m Message) {
 	d.LastApplied = laterStamp(d.LastApplied, &stamp)
 }
 
-// Merge combines two deltas of the same rocket. It is associative and, for
-// at most one explosion per rocket (the protocol), commutative.
-func Merge(a, b Delta) Delta {
-	m := Delta{Channel: a.Channel, SpeedDelta: a.SpeedDelta + b.SpeedDelta}
-	m.Launch = cmp.Or(a.Launch, b.Launch)
-	m.Mission = higherMission(a.Mission, b.Mission)
-	m.Explosion = cmp.Or(a.Explosion, b.Explosion)
-	m.LastApplied = laterStamp(a.LastApplied, b.LastApplied)
-	return m
-}
-
 // Rocket is the stored state of a rocket. Apply is the reference for the
 // SQL upsert in the repository: both must give the same result.
 type Rocket struct {
