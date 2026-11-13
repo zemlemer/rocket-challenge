@@ -75,8 +75,8 @@ The stack SHALL give a stopping server container more time than the server's shu
 The entry point SHALL forward request bodies of any size to the server instances, so that size handling is decided only by intake (see Oversized bodies) and never answered with `413` by the load balancer.
 
 #### Scenario: 2 MiB body through the load balancer
-- **WHEN** a client posts a 2 MiB body to `localhost:8088/messages`
-- **THEN** the response is `202` and the inbox holds the truncated body
+- **WHEN** a client delivers a complete 2 MiB body to `localhost:8088/messages`
+- **THEN** the response is `202` after the inbox stores an entry with `truncated = true`, zero body bytes and no parsed metadata
 
 ### Requirement: Simulator against the stack
 With the stack running, the provided simulator run on the host with `./rockets launch "http://localhost:8088/messages"` and its default options SHALL receive only `2xx` responses.

@@ -6,7 +6,7 @@ Defines when an inbox entry is a conforming rocket message that may change rocke
 ## Requirements
 
 ### Requirement: Conforming message
-An inbox entry SHALL be conforming when it is not truncated, has an identity with a valid channel (see Channel characters), has a message time and one of the message types `RocketLaunched`, `RocketSpeedIncreased`, `RocketSpeedDecreased`, `RocketExploded`, `RocketMissionChanged`, and its body is a JSON object whose `message` object satisfies the payload rules of that type. Metadata is taken from the inbox columns written by intake; unknown extra fields in the body SHALL be ignored.
+A conforming entry SHALL have `truncated = false`, an identity with a valid channel, a message time and a known type. Its body SHALL be a JSON object with a `message` object satisfying that type's payload rules. Metadata SHALL come from inbox columns. Extra body fields SHALL be ignored. Known types are `RocketLaunched`, `RocketSpeedIncreased`, `RocketSpeedDecreased`, `RocketExploded` and `RocketMissionChanged`. A set `truncated` flag SHALL cause rejection for exceeding the size limit.
 
 #### Scenario: Simulator message
 - **WHEN** the entry holds `{"metadata":{"channel":"c1","messageNumber":1,"messageTime":"2022-02-02T19:39:05.86337+01:00","messageType":"RocketLaunched"},"message":{"type":"Falcon-9","launchSpeed":500,"mission":"ARTEMIS"}}`
@@ -19,6 +19,14 @@ An inbox entry SHALL be conforming when it is not truncated, has an identity wit
 #### Scenario: Message is not an object
 - **WHEN** an entry's body has no `message`, or `message` is `null`, an array, a string or a number
 - **THEN** intake has stored it unchanged, and processing quarantines it with a reason saying `message` must be an object
+
+#### Scenario: Oversized request record
+- **WHEN** the processor claims an entry with `truncated = true` and zero body bytes
+- **THEN** it marks the entry `quarantined` with a reason indicating the body exceeded the size limit and changes no rocket state
+
+#### Scenario: Historical truncated entry
+- **WHEN** the processor claims a historical entry with `truncated = true` and a retained body prefix
+- **THEN** it quarantines the entry, keeps its prefix and changes no rocket state
 
 ### Requirement: Channel characters
 A conforming message's channel SHALL contain only ASCII letters, digits, `-` and `_`, so that it can be used unescaped in a URL path.

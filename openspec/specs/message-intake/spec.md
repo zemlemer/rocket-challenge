@@ -7,7 +7,7 @@ Accepts messages posted by senders and durably stores them in an inbox for later
 ## Requirements
 
 ### Requirement: Message endpoint
-The system SHALL accept messages via `POST /messages` and store each complete request body unchanged in the inbox together with the message metadata parsed from it (see Metadata extraction). Intake SHALL NOT evaluate the `message` payload and SHALL NOT update rocket state.
+The system SHALL accept messages via `POST /messages`. For a complete request body of at most 1 MiB, it SHALL store the body unchanged in the inbox with the parsed metadata (see Metadata extraction). Larger bodies SHALL follow Oversized bodies. Intake SHALL NOT evaluate the `message` payload or update rocket state.
 
 #### Scenario: Message stored
 - **WHEN** a client posts a `RocketLaunched` message for channel `c1` with message number 1
@@ -18,7 +18,7 @@ The system SHALL accept messages via `POST /messages` and store each complete re
 - **THEN** the system responds `202` and the body is stored without identity
 
 ### Requirement: Metadata extraction
-Intake SHALL parse the four `metadata` fields and store each one that is well-formed, independently of the others, and store nothing for a malformed one; a malformed field SHALL NOT cause a rejection. Invalid or truncated JSON and an empty body yield no metadata at all. The identity (`channel`, `messageNumber`) SHALL be stored only when both of its fields are well-formed.
+For a complete body of at most 1 MiB, intake SHALL store each well-formed `metadata` field independently and SHALL leave each malformed field absent without rejecting the request. Invalid JSON, empty bodies and oversized bodies SHALL yield no metadata. Intake SHALL store the identity (`channel`, `messageNumber`) only when both of its fields are well-formed.
 
 #### Scenario: Full metadata
 - **WHEN** a message has `channel` `"c1"`, `messageNumber` `7`, `messageTime` `"2022-02-02T19:39:05.86337+01:00"` and `messageType` `"RocketSpeedIncreased"`
@@ -52,7 +52,7 @@ A metadata field SHALL be well-formed when: `channel` is a non-empty JSON string
 - **THEN** the system responds `202` and an empty entry without metadata is stored
 
 ### Requirement: Incomplete requests
-A request whose body could not be read completely — the client disconnected or the read timed out — SHALL NOT be stored, neither in part nor as truncated, so that a later complete redelivery is not shadowed by a partial copy. If a response can still be sent it SHALL be a `5xx`.
+A request whose body cannot be read completely SHALL create no inbox entry, even if the bytes already received exceed 1 MiB. If a response can still be sent, it SHALL be a `5xx`.
 
 #### Scenario: Client disconnects mid-body
 - **WHEN** a client announces a 10 KiB body, sends 2 KiB and closes the connection
@@ -61,6 +61,14 @@ A request whose body could not be read completely — the client disconnected or
 #### Scenario: Complete redelivery after an aborted attempt
 - **WHEN** the aborted message is later delivered completely
 - **THEN** it is stored with its identity and full body and answered with `202`
+
+#### Scenario: Client disconnects after exceeding the limit
+- **WHEN** a client announces a 2 MiB body, sends 1,048,577 bytes and closes the connection
+- **THEN** nothing is stored in the inbox
+
+#### Scenario: Read times out after exceeding the limit
+- **WHEN** intake receives more than 1 MiB and the body read times out before the end of the request
+- **THEN** nothing is stored in the inbox, and the system responds with `5xx` if it can still send a response
 
 ### Requirement: Response codes
 `POST /messages` SHALL respond `202 Accepted` whenever the request has been durably stored, regardless of its content, and `5xx` only when it could not be stored. It SHALL NOT respond with `4xx`. Messages are never rejected because senders redeliver them unchanged: a rejection could never be resolved by redelivery.
@@ -96,15 +104,15 @@ A request whose identity (`channel`, `messageNumber`) is already in the inbox �
 - **THEN** the redelivery is answered with `202` and the inbox still holds the single quarantined entry
 
 ### Requirement: Oversized bodies
-A body larger than 1 MiB (1,048,576 bytes) SHALL be stored truncated to its first 1 MiB, marked as truncated, and answered with `202`. A body of exactly 1 MiB SHALL be stored complete and not marked as truncated.
+After reading a complete body larger than 1 MiB (1,048,576 bytes), intake SHALL commit an inbox entry with the size flag set and zero body bytes, then respond `202`. The entry SHALL have no parsed metadata. A complete body of exactly 1 MiB SHALL be stored unchanged with the size flag clear.
 
 #### Scenario: 2 MiB body
-- **WHEN** a client posts a 2 MiB body
-- **THEN** the system responds `202` and the inbox holds its first 1 MiB marked as truncated
+- **WHEN** a client delivers a complete 2 MiB body, even if the prefix contains well-formed metadata
+- **THEN** the system responds `202` after committing an inbox entry with `truncated = true`, an empty body and no parsed metadata
 
 #### Scenario: Exactly 1 MiB
-- **WHEN** a client posts a body of exactly 1,048,576 bytes
-- **THEN** the inbox holds the whole body, not marked as truncated
+- **WHEN** a client delivers a complete body of exactly 1,048,576 bytes
+- **THEN** the inbox holds the whole body with `truncated = false`
 
 ### Requirement: Recovery from storage outage
 After the database becomes reachable again, intake SHALL resume storing messages without a restart of the service.

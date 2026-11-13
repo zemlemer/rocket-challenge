@@ -39,7 +39,7 @@ Each migration SHALL be applied atomically together with the record of its versi
 - **THEN** the run fails with an error naming that migration, the database stays at the previous version, and earlier migrations remain applied
 
 ### Requirement: Inbox storage
-The schema SHALL provide an inbox that stores, per accepted request: the raw body as bytes; the parsed metadata — identity (`channel`, `messageNumber`), `messageTime` as a timestamp with time zone, `messageType` — each field when known or nothing; whether the body was truncated; and the time of receipt. Each entry SHALL get a unique, increasing id reflecting insertion order.
+Each inbox entry SHALL store an increasing unique ID reflecting insertion order, a receipt time, body bytes, a boolean `truncated` flag and any parsed metadata (identity, `messageType` and `messageTime` as a timestamp with time zone). For new entries, `truncated` SHALL indicate a fully received body larger than 1 MiB. Such entries SHALL have zero body bytes and all metadata columns `NULL`. Historical entries SHALL retain their stored bytes and metadata.
 
 #### Scenario: Entry with identity
 - **WHEN** a body is stored with channel `c1`, message number 5, a message time, message type `RocketLaunched` and truncation flag `false`
@@ -48,6 +48,14 @@ The schema SHALL provide an inbox that stores, per accepted request: the raw bod
 #### Scenario: Entry without identity
 - **WHEN** a body that is not valid JSON is stored without identity
 - **THEN** the inbox holds it with empty metadata
+
+#### Scenario: Oversized entry and empty request
+- **WHEN** intake records a fully received oversized request and a separate empty request
+- **THEN** both entries have zero body bytes and all metadata columns `NULL`, and only the oversized entry has `truncated = true`
+
+#### Scenario: Historical truncated body
+- **WHEN** the system is upgraded with an existing `truncated = true` row containing a stored prefix
+- **THEN** the row and its prefix remain in the inbox
 
 ### Requirement: Inbox identity uniqueness
 The inbox SHALL hold at most one entry per identity (`channel`, `messageNumber`). Entries without identity SHALL NOT be subject to this constraint.
