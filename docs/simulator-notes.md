@@ -112,3 +112,54 @@ A later full `make test-e2e` run measured 14 ms / 5 ms (undisturbed) and
 message-processing spec (≤ 1 s, ≤ 2 s). The spread — 14 ms to 599 ms for the
 same load — points at the environment (Docker Desktop disk and CPU) rather than
 the processor; the worst case so far leaves about 400 ms of margin.
+
+## Explosion and event rotation (possible optimization, not implemented)
+
+Two more runs on 2026-11-13, posting to a throwaway HTTP sink instead of the
+stack: the default seed 444, and seed 7 with `--max-messages=300000`.
+
+**Observed:**
+
+- After `RocketExploded`, a channel sends nothing more. Seed 444: 6 of 20
+  rockets exploded; seed 7: 19 of 20, and the simulator then stalled with one
+  live rocket (stopped by hand after about 194,000 messages). No exploded
+  rocket was replaced by a new one, and no channel restarted its numbering
+  within a run.
+- Channels are UUID version 5, so they are deterministic: 16 of the 20 channels
+  of seed 444 and seed 7 are the same. A second run against the same database
+  starts those channels again at `messageNumber` 1; intake treats the first
+  part as duplicates and the rest is applied on top of the earlier rocket. Run
+  the simulator once per database (`docker compose down -v` before a rerun).
+
+**Assumption:** a rocket that has exploded sends no further events. This
+holds in every run so far but is not promised by the challenge, and the
+rocket-state spec still applies messages that arrive after an explosion.
+
+**Optimization this would allow:** once a rocket has exploded with message
+number N and all messages 1..N are processed without gaps, its inbox entries
+could be rotated out (deleted or moved to an archive). The `rockets` row stays
+and records N; a later delivery for that channel with a number ≤ N would be
+marked as a duplicate by the processor, under the rocket's row lock, without
+effect.
+
+**Expected gain:** an inbox entry takes about 650 bytes including indexes
+(30,000 entries = 19 MB, of which bodies 5.6 MB and the identity index
+5.7 MB), so a default run needs about 65 MB. Exploded rockets account for 5 to
+11% of the entries, so this rotation saves about that share. Most entries
+belong to rockets that are still flying.
+
+**Why it is not implemented:**
+
+- It contradicts two approved requirements: processed entries stay in the
+  inbox, and the inbox alone decides the answer to a redelivery. It needs a
+  new outcome (`duplicate`) and a sealed-through number per rocket.
+- If the assumption breaks (for example, a rerun on the same channels), the
+  later messages would be dropped as duplicates instead of being applied.
+- A missing message keeps the channel from being sealed, so the saving
+  depends on the stream.
+- Rotated entries can no longer be used to recompute state from the inbox,
+  which the e2e test uses as its reference.
+
+At the challenge's scale the space is not a problem, so the inbox keeps every
+entry. A broader variant (a contiguous watermark per channel, compacting live
+rockets too) would save more, with the same spec changes.

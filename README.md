@@ -80,8 +80,10 @@ inbox (100 ms) and shutdown timeout (15 s) are fixed in
 
 Each batch is one transaction: claim the oldest unprocessed entries
 (`FOR UPDATE SKIP LOCKED`, so processors never take the same entry), validate
-them, apply them, mark them. Entries are never deleted; every entry ends with
-an outcome:
+them, apply them, mark them. Entries are never deleted (rotating out the
+entries of exploded rockets is a possible optimization, see
+[docs/simulator-notes.md](docs/simulator-notes.md#explosion-and-event-rotation-possible-optimization-not-implemented));
+every entry ends with an outcome:
 
 | `outcome` | Meaning |
 |---|---|
