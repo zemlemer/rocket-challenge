@@ -35,7 +35,7 @@ func TestEntryPointReusesUpstreamConnections(t *testing.T) {
 	}
 	// A proxy_set_header in a location would replace, not extend, the
 	// inherited ones and drop the empty Connection header.
-	for _, header := range []string{"location / {", "location /rockets {"} {
+	for _, header := range []string{"location / {", "location /rockets {", "location /stats {"} {
 		if strings.Contains(block(t, loaded, header), "proxy_set_header") {
 			t.Errorf("%s sets its own proxy headers and loses the server-level Connection \"\"", header)
 		}

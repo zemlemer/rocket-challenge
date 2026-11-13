@@ -55,6 +55,7 @@ start on a database that is not fully migrated and shuts down gracefully on
 | `GET /healthz` | liveness: `200 {"status":"ok"}` while the process serves HTTP; does not check the database |
 | `GET /rockets/{channel}` | `200` with one rocket (see [Reading rockets](#reading-rockets)); `404` when there is none |
 | `GET /rockets` | `200 {"rockets": [...]}`, sortable; `400` for invalid sort parameters |
+| `GET /stats` | `200` with intake and processing progress and per-rocket completeness (see [Progress report](#progress-report)) |
 
 Unknown paths get `404`, wrong methods `405`, both as `{"error": "..."}`.
 `HEAD` is accepted wherever `GET` is.
@@ -193,6 +194,71 @@ they keep working while processors are stopped.
   JavaScript clients.
 - No CORS or caching headers: a browser dashboard on another origin needs a
   proxy.
+
+## Progress report
+
+`GET /stats` reports how far intake and processing have got and whether every
+rocket has a complete message sequence. It is computed from the database at
+request time, so every server instance gives the same answer. Watch it while
+the simulator runs (or `watch -n1 curl -s localhost:8088/stats` where `watch`
+is installed):
+
+```sh
+while sleep 1; do curl -s localhost:8088/stats; echo; done
+```
+
+```json
+{
+  "asOf": "2026-11-13T10:00:00.123456Z",
+  "inbox": {
+    "received": 100000,
+    "pending": 0,
+    "applied": 100000,
+    "quarantined": 0,
+    "failed": 0,
+    "oldestPendingAt": null,
+    "oldestPendingAgeSeconds": 0
+  },
+  "rockets": [
+    {
+      "channel": "193270a9-c9cf-404a-8f83-838e71d9ae67",
+      "highestMessageNumber": 6498,
+      "received": 6498,
+      "missing": 0,
+      "pending": 0,
+      "applied": 6498,
+      "quarantined": 0,
+      "failed": 0,
+      "complete": true
+    }
+  ]
+}
+```
+
+**`inbox`** counts every stored entry, including those without identity or
+with an invalid channel: `received = pending + applied + quarantined + failed`.
+`oldestPendingAt` is the receive time of the oldest unprocessed entry and
+`oldestPendingAgeSeconds` its age (the processing lag); `null` and `0` when the
+inbox is drained. `asOf` and the age use the database clock.
+
+**`rockets`** has one entry per valid channel, sorted byte-wise, launched or
+not, counting that channel's entries numbered 1 or higher.
+`highestMessageNumber` is the highest number received, not the newest applied
+one (that is `lastMessageNumber` in `GET /rockets`). `missing` counts the
+numbers from 1 to `highestMessageNumber` with no entry; a redelivered message
+is stored once and never hides a gap. `complete` is `true` when nothing is
+missing, pending or failed; quarantined messages do not make a rocket
+incomplete.
+
+**Errors** are those of the read endpoints: `503` when the database is
+unavailable or slower than 5 s (not retried by nginx), `500` otherwise.
+
+**Limitations.**
+- Each request scans the whole inbox; fine at the simulator's scale, but the
+  cost grows with the inbox (bounded by the 5 s timeout).
+- `rockets` is unpaged.
+- A lost *last* message of a rocket is not visible: nothing tells the system
+  which number should be the last.
 
 ## Database migrations
 

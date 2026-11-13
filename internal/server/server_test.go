@@ -15,7 +15,7 @@ func TestRoutes(t *testing.T) {
 	}
 	routes := server.Routes(server.Handlers{
 		Messages: ok(http.StatusAccepted), Health: ok(http.StatusOK),
-		Rockets: ok(http.StatusOK), Rocket: ok(http.StatusTeapot),
+		Rockets: ok(http.StatusOK), Rocket: ok(http.StatusTeapot), Stats: ok(http.StatusNonAuthoritativeInfo),
 	})
 
 	for _, tc := range []struct {
@@ -38,6 +38,11 @@ func TestRoutes(t *testing.T) {
 		{"DELETE", "/rockets/c1", http.StatusMethodNotAllowed, true},
 		{"GET", "/rockets/", http.StatusNotFound, true},
 		{"GET", "/rockets/c1/x", http.StatusNotFound, true},
+		{"GET", "/stats", http.StatusNonAuthoritativeInfo, false},
+		{"HEAD", "/stats", http.StatusNonAuthoritativeInfo, false},
+		{"GET", "/stats?x=1", http.StatusNonAuthoritativeInfo, false},
+		{"POST", "/stats", http.StatusMethodNotAllowed, true},
+		{"GET", "/stats/x", http.StatusNotFound, true},
 	} {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
 			rec := httptest.NewRecorder()
@@ -65,7 +70,7 @@ func TestRoutes(t *testing.T) {
 func TestRocketRoutePathHandling(t *testing.T) {
 	var got string
 	none := http.NotFoundHandler()
-	routes := server.Routes(server.Handlers{Messages: none, Health: none, Rockets: none,
+	routes := server.Routes(server.Handlers{Messages: none, Health: none, Rockets: none, Stats: none,
 		Rocket: http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { got = r.PathValue("channel") })})
 	for path, want := range map[string]string{"/rockets/a%2Fb": "a/b", "/rockets/%E2%82%AC": "€", "/rockets/c%31": "c1"} {
 		got = ""
@@ -81,9 +86,11 @@ func TestRocketRoutePathHandling(t *testing.T) {
 			t.Errorf("%s: status %d location %q, want 307 to /rockets/c1", path, rec.Code, rec.Header().Get("Location"))
 		}
 	}
-	rec := httptest.NewRecorder()
-	routes.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/rockets", nil))
-	if rec.Header().Get("Allow") != "GET, HEAD" {
-		t.Errorf("Allow = %q", rec.Header().Get("Allow"))
+	for _, path := range []string{"/rockets", "/stats"} {
+		rec := httptest.NewRecorder()
+		routes.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, path, nil))
+		if rec.Header().Get("Allow") != "GET, HEAD" {
+			t.Errorf("%s: Allow = %q", path, rec.Header().Get("Allow"))
+		}
 	}
 }
