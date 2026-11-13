@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"rockets/internal/testdb"
 	"slices"
 	"strings"
 	"testing"
@@ -17,16 +18,6 @@ import (
 	"rockets/internal/domain"
 	"rockets/internal/handler"
 )
-
-var launchTime = time.Date(2022, 2, 2, 19, 39, 5, 863370000, time.FixedZone("", 3600))
-
-func launched() domain.Rocket {
-	return domain.Rocket{
-		Channel: "c1", Speed: 800, RocketType: ptr("Falcon-9"), LaunchSpeed: ptr(int64(500)),
-		LaunchedAt: ptr(launchTime), Mission: ptr("ARTEMIS"), MissionNumber: 1,
-		LastAppliedNumber: 2, LastAppliedAt: ptr(launchTime.Add(time.Second)),
-	}
-}
 
 func TestRocketRepresentation(t *testing.T) {
 	rec := getRocket(t, &fakeRockets{rockets: []domain.Rocket{launched()}}, "c1")
@@ -50,7 +41,7 @@ func TestRocketRepresentation(t *testing.T) {
 }
 
 func TestRocketExplodedBeforeLaunch(t *testing.T) {
-	r := domain.Rocket{Channel: "c1", Speed: 300, ExplosionReason: ptr("FROZEN_O_RINGS"), LastAppliedNumber: 5, LastAppliedAt: ptr(launchTime)}
+	r := domain.Rocket{Channel: "c1", Speed: 300, ExplosionReason: testdb.Ptr("FROZEN_O_RINGS"), LastAppliedNumber: 5, LastAppliedAt: testdb.Ptr(launchTime)}
 	got := decode(t, getRocket(t, &fakeRockets{rockets: []domain.Rocket{r}}, "c1"))
 	for _, k := range []string{"type", "launchSpeed", "launchedAt", "mission"} {
 		if v, present := got[k]; !present || v != nil {
@@ -65,8 +56,8 @@ func TestRocketExplodedBeforeLaunch(t *testing.T) {
 func TestRocketTimes(t *testing.T) {
 	for name, tc := range map[string]struct{ in, want string }{
 		"nanoseconds truncated": {"2022-02-02T19:39:05.123456789+01:00", "2022-02-02T18:39:05.123456Z"},
-		"year 10000 in UTC":   {"9999-12-31T23:30:00-01:00", "10000-01-01T00:30:00Z"},
-		"year -1 in UTC":      {"0000-01-01T00:30:00+01:00", "-0001-12-31T23:30:00Z"},
+		"year 10000 in UTC":     {"9999-12-31T23:30:00-01:00", "10000-01-01T00:30:00Z"},
+		"year -1 in UTC":        {"0000-01-01T00:30:00+01:00", "-0001-12-31T23:30:00Z"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			at, err := time.Parse(time.RFC3339Nano, tc.in)
@@ -136,12 +127,6 @@ func TestRocketClientGoneIsNotAnError(t *testing.T) {
 	if rec.Body.Len() != 0 || logs.Len() != 0 {
 		t.Fatalf("body %q, logs %q; want neither", rec.Body, logs.String())
 	}
-}
-
-func rocketOn(channel string) domain.Rocket {
-	r := launched()
-	r.Channel = channel
-	return r
 }
 
 func TestRocketsQueryParameters(t *testing.T) {

@@ -12,6 +12,7 @@ import (
 	"rockets/internal/testdb"
 	"sync"
 	"testing"
+	"time"
 )
 
 // fakeRepo records saved entries; identified duplicates are skipped like the real one.
@@ -123,8 +124,6 @@ func decode(t *testing.T, rec *httptest.ResponseRecorder) map[string]any {
 	return m
 }
 
-func ptr[T any](v T) *T { return &v }
-
 // listRockets serves GET /rockets?<query>.
 func listRockets(t *testing.T, repo *fakeRockets, query string) *httptest.ResponseRecorder {
 	t.Helper()
@@ -150,4 +149,20 @@ func listed(t *testing.T, rec *httptest.ResponseRecorder) []string {
 		out[i] = r.Channel
 	}
 	return out
+}
+
+var launchTime = time.Date(2022, 2, 2, 19, 39, 5, 863370000, time.FixedZone("", 3600))
+
+func launched() domain.Rocket {
+	return domain.Rocket{
+		Channel: "c1", Speed: 800, RocketType: testdb.Ptr("Falcon-9"), LaunchSpeed: testdb.Ptr(int64(500)),
+		LaunchedAt: testdb.Ptr(launchTime), Mission: testdb.Ptr("ARTEMIS"), MissionNumber: 1,
+		LastAppliedNumber: 2, LastAppliedAt: testdb.Ptr(launchTime.Add(time.Second)),
+	}
+}
+
+func rocketOn(channel string) domain.Rocket {
+	r := launched()
+	r.Channel = channel
+	return r
 }

@@ -22,15 +22,22 @@ import (
 func TestEntryPointReusesUpstreamConnections(t *testing.T) {
 	loaded := stripComments(compose(t, "exec", "-T", "nginx", "nginx", "-T"))
 	upstream := block(t, loaded, "upstream api {")
-	location := block(t, loaded, "location / {")
+	server := block(t, loaded, "server {") // inherited by every location
 	for _, want := range []struct{ where, text string }{
 		{upstream, "keepalive 32;"},
 		{upstream, "keepalive_timeout 50s;"}, // below the server's 60 s IdleTimeout
-		{location, "proxy_http_version 1.1;"},
-		{location, `proxy_set_header Connection "";`},
+		{server, "proxy_http_version 1.1;"},
+		{server, `proxy_set_header Connection "";`},
 	} {
 		if !strings.Contains(want.where, want.text) {
 			t.Errorf("loaded nginx config lacks %q in the right block", want.text)
+		}
+	}
+	// A proxy_set_header in a location would replace, not extend, the
+	// inherited ones and drop the empty Connection header.
+	for _, header := range []string{"location / {", "location /rockets {"} {
+		if strings.Contains(block(t, loaded, header), "proxy_set_header") {
+			t.Errorf("%s sets its own proxy headers and loses the server-level Connection \"\"", header)
 		}
 	}
 

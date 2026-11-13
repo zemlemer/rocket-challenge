@@ -3,7 +3,7 @@
 package e2e
 
 import (
-	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"reflect"
@@ -11,44 +11,6 @@ import (
 	"testing"
 	"time"
 )
-
-// apiRocket is the public representation read back from the API; times are
-// decoded so that they can be compared with the database's.
-type apiRocket struct {
-	Channel           string     `json:"channel"`
-	Type              *string    `json:"type"`
-	Status            string     `json:"status"`
-	Speed             int64      `json:"speed"`
-	LaunchSpeed       *int64     `json:"launchSpeed"`
-	Mission           *string    `json:"mission"`
-	LaunchedAt        *time.Time `json:"launchedAt"`
-	ExplosionReason   *string    `json:"explosionReason"`
-	LastMessageNumber int64      `json:"lastMessageNumber"`
-	LastMessageAt     *time.Time `json:"lastMessageAt"`
-}
-
-func getJSON(t *testing.T, path string, v any) int {
-	t.Helper()
-	resp, err := http.Get(baseURL + path)
-	if err != nil {
-		t.Fatalf("GET %s: %v", path, err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode == http.StatusOK {
-		if err := json.NewDecoder(resp.Body).Decode(v); err != nil {
-			t.Fatalf("GET %s: decode: %v", path, err)
-		}
-	}
-	return resp.StatusCode
-}
-
-func utc(t *time.Time) *time.Time {
-	if t == nil {
-		return nil
-	}
-	u := t.UTC()
-	return &u
-}
 
 // assertAPIMatchesState compares GET /rockets and GET /rockets/{channel} with
 // the rockets table, which assertStateMatchesInbox has checked against an
@@ -106,8 +68,28 @@ func assertAPIMatchesState(t *testing.T) {
 	}
 }
 
-// Spec rocket-query "Processors stopped": reads keep working from stored state.
+// Spec rocket-query "Processors stopped": reads keep answering with the last
+// processed state.
 func TestReadsWhileProcessorsStopped(t *testing.T) {
+	ch := uniqueChannel(t)
+	if code := post(t, fmt.Sprintf(`{"metadata":{"channel":%q,"messageNumber":1,"messageTime":"2022-02-02T19:39:05Z","messageType":"RocketLaunched"},"message":{"type":"A","launchSpeed":500,"mission":"M"}}`, ch)); code != http.StatusAccepted {
+		t.Fatalf("POST launch = %d", code)
+	}
+	var before apiRocket
+	deadline := time.Now().Add(10 * time.Second)
+	for getJSON(t, "/rockets/"+ch, &before) != http.StatusOK {
+		if time.Now().After(deadline) {
+			t.Fatal("launch not processed within 10 s")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	var listBefore struct {
+		Rockets []apiRocket `json:"rockets"`
+	}
+	if code := getJSON(t, "/rockets", &listBefore); code != http.StatusOK {
+		t.Fatalf("GET /rockets = %d", code)
+	}
+
 	processors := containers(t, "processor")
 	t.Cleanup(func() {
 		for _, c := range processors {
@@ -117,11 +99,16 @@ func TestReadsWhileProcessorsStopped(t *testing.T) {
 	for _, c := range processors {
 		run(t, "docker", "stop", c)
 	}
-	var list struct {
+
+	var after apiRocket
+	if code := getJSON(t, "/rockets/"+ch, &after); code != http.StatusOK || !reflect.DeepEqual(after, before) {
+		t.Fatalf("GET /rockets/%s with processors stopped = %d %+v, want %+v", ch, code, after, before)
+	}
+	var listAfter struct {
 		Rockets []apiRocket `json:"rockets"`
 	}
-	if code := getJSON(t, "/rockets", &list); code != http.StatusOK || list.Rockets == nil {
-		t.Fatalf("GET /rockets with all processors stopped = %d", code)
+	if code := getJSON(t, "/rockets", &listAfter); code != http.StatusOK || !reflect.DeepEqual(listAfter, listBefore) {
+		t.Fatalf("GET /rockets with processors stopped = %d, %d rockets; want the %d listed before", code, len(listAfter.Rockets), len(listBefore.Rockets))
 	}
 }
 

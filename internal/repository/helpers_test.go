@@ -7,6 +7,7 @@ import (
 	"rockets/internal/repository"
 	"rockets/internal/testdb"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -83,6 +84,40 @@ func outcomes(t *testing.T, p *pgxpool.Pool) map[int64]outcome {
 			t.Fatal(err)
 		}
 		out[id] = o
+	}
+	return out
+}
+
+// stored is a rockets row inserted directly, bypassing processing.
+type stored struct {
+	channel  string
+	speed    int64
+	typ      *string
+	mission  *string
+	launched *time.Time
+	reason   *string
+}
+
+func insertRocket(t *testing.T, p *pgxpool.Pool, r stored) {
+	t.Helper()
+	var launchSpeed *int64
+	if r.typ != nil {
+		launchSpeed = testdb.Ptr(int64(0))
+	}
+	_, err := p.Exec(context.Background(), `
+		insert into rockets (channel, speed, rocket_type, launch_speed, launched_at, mission,
+		                     explosion_reason, last_applied_message_number, last_applied_message_at)
+		values ($1, $2, $3, $4, $5, $6, $7, 1, $8)`,
+		r.channel, r.speed, r.typ, launchSpeed, r.launched, r.mission, r.reason, testdb.MessageTime)
+	if err != nil {
+		t.Fatalf("insert rocket %s: %v", r.channel, err)
+	}
+}
+
+func channels(rs []domain.Rocket) []string {
+	out := make([]string, len(rs))
+	for i, r := range rs {
+		out[i] = r.Channel
 	}
 	return out
 }

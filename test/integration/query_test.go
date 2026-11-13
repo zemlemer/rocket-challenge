@@ -10,12 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"rockets/internal/domain"
-	"rockets/internal/handler"
 	"rockets/internal/repository"
-	"rockets/internal/server"
 	"rockets/internal/testdb"
 )
 
@@ -25,13 +21,7 @@ func TestQueryAPIReadsProcessedState(t *testing.T) {
 	_, p := testdb.Migrated(t)
 	ctx := context.Background()
 	log := testdb.Logger()
-	rockets := &handler.Rockets{Repo: repository.NewRockets(p), Log: log}
-	routes := server.Routes(server.Handlers{
-		Messages: &handler.Messages{Repo: repository.NewInbox(p), Log: log},
-		Health:   handler.Health{},
-		Rockets:  http.HandlerFunc(rockets.List),
-		Rocket:   http.HandlerFunc(rockets.Get),
-	})
+	routes := serverRoutes(p)
 	do := func(method, path, body string) *httptest.ResponseRecorder {
 		t.Helper()
 		rec := httptest.NewRecorder()
@@ -103,25 +93,6 @@ func TestQueryAPIReadsProcessedState(t *testing.T) {
 	}
 }
 
-// queryRoutes serves the read endpoints over pool, as the server wires them.
-func queryRoutes(p *pgxpool.Pool) http.Handler {
-	none := http.NotFoundHandler()
-	rockets := &handler.Rockets{Repo: repository.NewRockets(p), Log: testdb.Logger()}
-	return server.Routes(server.Handlers{Messages: none, Health: none,
-		Rockets: http.HandlerFunc(rockets.List), Rocket: http.HandlerFunc(rockets.Get)})
-}
-
-func getRocket(t *testing.T, routes http.Handler, channel string) map[string]any {
-	t.Helper()
-	rec := httptest.NewRecorder()
-	routes.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/rockets/"+channel, nil))
-	var m map[string]any
-	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &m) != nil {
-		t.Fatalf("GET /rockets/%s = %d %s", channel, rec.Code, rec.Body)
-	}
-	return m
-}
-
 // Spec rocket-query "Read during processing": a read does not wait for a
 // transaction that is changing rocket state and sees only committed state.
 func TestReadDuringProcessing(t *testing.T) {
@@ -131,7 +102,7 @@ func TestReadDuringProcessing(t *testing.T) {
 	if _, err := repository.NewProcessing(p, testdb.Logger()).ProcessBatch(ctx, 10, domain.Fold); err != nil {
 		t.Fatal(err)
 	}
-	routes := queryRoutes(p)
+	routes := serverRoutes(p)
 
 	tx, err := p.Begin(ctx) // stands in for a processor batch that has not committed
 	if err != nil {
@@ -175,7 +146,7 @@ func TestFieldsBeforeLaunch(t *testing.T) {
 	if _, err := proc.ProcessBatch(ctx, 10, domain.Fold); err != nil {
 		t.Fatal(err)
 	}
-	routes := queryRoutes(p)
+	routes := serverRoutes(p)
 
 	r := getRocket(t, routes, "c1")
 	if r["mission"] != "MARS" || r["type"] != nil || r["launchSpeed"] != nil || r["launchedAt"] != nil || r["status"] != "exploded" || r["lastMessageNumber"] != 4.0 {

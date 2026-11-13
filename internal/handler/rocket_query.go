@@ -2,6 +2,8 @@ package handler
 
 import (
 	"context"
+	"slices"
+	"strings"
 
 	"rockets/internal/domain"
 )
@@ -19,8 +21,22 @@ const (
 	SortLaunchedAt SortField = "launchedAt"
 )
 
-// SortFields lists the accepted sort fields in the order they are documented.
-var SortFields = []SortField{SortChannel, SortType, SortMission, SortSpeed, SortStatus, SortLaunchedAt}
+// sortFields lists the accepted sort fields in the order they are documented;
+// sortError, the 400 message for any other value, is derived from it.
+var (
+	sortFields = []SortField{SortChannel, SortType, SortMission, SortSpeed, SortStatus, SortLaunchedAt}
+	sortError  = func() string {
+		names := make([]string, len(sortFields))
+		for i, f := range sortFields {
+			names[i] = string(f)
+		}
+		return "sort: must be given once as one of " + strings.Join(names, ", ")
+	}()
+)
+
+// SortFields returns the accepted sort fields; storage implementations must
+// support every one of them.
+func SortFields() []SortField { return slices.Clone(sortFields) }
 
 // SortOrder is the direction of a sort.
 type SortOrder string

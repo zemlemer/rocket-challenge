@@ -2,15 +2,21 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math/rand/v2"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"rockets/internal/domain"
+	"rockets/internal/handler"
 	"rockets/internal/postgres"
+	"rockets/internal/repository"
+	"rockets/internal/server"
 	"rockets/internal/testdb"
 )
 
@@ -102,4 +108,28 @@ func assertMatchesReference(t *testing.T, p *pgxpool.Pool) {
 			t.Fatalf("%s:\n got  %s\n want %s", ch, testdb.Describe(got), testdb.Describe(w))
 		}
 	}
+}
+
+// serverRoutes wires intake and the read endpoints over pool, as
+// `rockets server` does.
+func serverRoutes(p *pgxpool.Pool) http.Handler {
+	log := testdb.Logger()
+	rockets := &handler.Rockets{Repo: repository.NewRockets(p), Log: log}
+	return server.Routes(server.Handlers{
+		Messages: &handler.Messages{Repo: repository.NewInbox(p), Log: log},
+		Health:   handler.Health{},
+		Rockets:  http.HandlerFunc(rockets.List),
+		Rocket:   http.HandlerFunc(rockets.Get),
+	})
+}
+
+func getRocket(t *testing.T, routes http.Handler, channel string) map[string]any {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	routes.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/rockets/"+channel, nil))
+	var m map[string]any
+	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &m) != nil {
+		t.Fatalf("GET /rockets/%s = %d %s", channel, rec.Code, rec.Body)
+	}
+	return m
 }

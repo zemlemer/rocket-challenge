@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -245,4 +246,42 @@ func tail(s string, n int) string {
 		lines = lines[len(lines)-n:]
 	}
 	return strings.Join(lines, "\n")
+}
+
+// apiRocket is the public representation read back from the API; times are
+// decoded so that they can be compared with the database's.
+type apiRocket struct {
+	Channel           string     `json:"channel"`
+	Type              *string    `json:"type"`
+	Status            string     `json:"status"`
+	Speed             int64      `json:"speed"`
+	LaunchSpeed       *int64     `json:"launchSpeed"`
+	Mission           *string    `json:"mission"`
+	LaunchedAt        *time.Time `json:"launchedAt"`
+	ExplosionReason   *string    `json:"explosionReason"`
+	LastMessageNumber int64      `json:"lastMessageNumber"`
+	LastMessageAt     *time.Time `json:"lastMessageAt"`
+}
+
+func getJSON(t *testing.T, path string, v any) int {
+	t.Helper()
+	resp, err := http.Get(baseURL + path)
+	if err != nil {
+		t.Fatalf("GET %s: %v", path, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusOK {
+		if err := json.NewDecoder(resp.Body).Decode(v); err != nil {
+			t.Fatalf("GET %s: decode: %v", path, err)
+		}
+	}
+	return resp.StatusCode
+}
+
+func utc(t *time.Time) *time.Time {
+	if t == nil {
+		return nil
+	}
+	u := t.UTC()
+	return &u
 }

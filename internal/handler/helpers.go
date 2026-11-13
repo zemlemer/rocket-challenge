@@ -45,7 +45,7 @@ func readFailed(w http.ResponseWriter, r *http.Request, log *slog.Logger, op str
 	case r.Context().Err() != nil:
 		log.Debug(op+": client gone", "error", err)
 	case errors.Is(err, ErrUnavailable), errors.Is(err, context.DeadlineExceeded):
-		log.Error(op+": storage unavailable", "error", err)
+		log.Warn(op+": storage unavailable", "error", err) // expected during outages; 500s stay errors
 		helpers.WriteError(w, http.StatusServiceUnavailable, "storage unavailable, retry later")
 	default:
 		log.Error(op+" failed", "error", err)
@@ -64,8 +64,8 @@ func parseRocketQuery(raw string) (RocketQuery, string) {
 	q := RocketQuery{Sort: SortChannel, Order: Asc}
 
 	if v, ok := values["sort"]; ok {
-		if len(v) != 1 || !slices.Contains(SortFields, SortField(v[0])) {
-			return RocketQuery{}, "sort: must be given once as one of channel, type, mission, speed, status, launchedAt"
+		if len(v) != 1 || !slices.Contains(sortFields, SortField(v[0])) {
+			return RocketQuery{}, sortError
 		}
 		q.Sort = SortField(v[0])
 	}

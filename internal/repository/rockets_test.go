@@ -7,60 +7,22 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"rockets/internal/domain"
 	"rockets/internal/handler"
 	"rockets/internal/repository"
 	"rockets/internal/testdb"
 )
 
-// stored is a rockets row inserted directly, bypassing processing.
-type stored struct {
-	channel  string
-	speed    int64
-	typ      *string
-	mission  *string
-	launched *time.Time
-	reason   *string
-}
-
-func ptr[T any](v T) *T { return &v }
-
-func insertRocket(t *testing.T, p *pgxpool.Pool, r stored) {
-	t.Helper()
-	var launchSpeed *int64
-	if r.typ != nil {
-		launchSpeed = ptr(int64(0))
-	}
-	_, err := p.Exec(context.Background(), `
-		insert into rockets (channel, speed, rocket_type, launch_speed, launched_at, mission,
-		                     explosion_reason, last_applied_message_number, last_applied_message_at)
-		values ($1, $2, $3, $4, $5, $6, $7, 1, $8)`,
-		r.channel, r.speed, r.typ, launchSpeed, r.launched, r.mission, r.reason, testdb.MessageTime)
-	if err != nil {
-		t.Fatalf("insert rocket %s: %v", r.channel, err)
-	}
-}
-
-func channels(rs []domain.Rocket) []string {
-	out := make([]string, len(rs))
-	for i, r := range rs {
-		out[i] = r.Channel
-	}
-	return out
-}
-
 func TestRocketsSorting(t *testing.T) {
 	_, p := testdb.Migrated(t)
-	t1, t2 := ptr(testdb.MessageTime), ptr(testdb.MessageTime.Add(time.Hour))
+	t1, t2 := testdb.Ptr(testdb.MessageTime), testdb.Ptr(testdb.MessageTime.Add(time.Hour))
 	for _, r := range []stored{
-		{channel: "a", speed: 100, typ: ptr("Soyuz"), mission: ptr("Mars"), launched: t2},
-		{channel: "B", speed: 300, typ: ptr("Falcon-9"), mission: ptr("Moon"), launched: t1, reason: ptr("BOOM")},
-		{channel: "c", speed: 300, reason: ptr("BOOM")},                      // exploded, not launched
-		{channel: "d", speed: -5, mission: ptr("Mars"), reason: ptr("BOOM")}, // exploded, mission known
+		{channel: "a", speed: 100, typ: testdb.Ptr("Soyuz"), mission: testdb.Ptr("Mars"), launched: t2},
+		{channel: "B", speed: 300, typ: testdb.Ptr("Falcon-9"), mission: testdb.Ptr("Moon"), launched: t1, reason: testdb.Ptr("BOOM")},
+		{channel: "c", speed: 300, reason: testdb.Ptr("BOOM")},                             // exploded, not launched
+		{channel: "d", speed: -5, mission: testdb.Ptr("Mars"), reason: testdb.Ptr("BOOM")}, // exploded, mission known
 		{channel: "e", speed: 7}, // neither: hidden
-		{channel: "f", speed: 100, typ: ptr("Soyuz"), mission: ptr("Moon"), launched: t1},
+		{channel: "f", speed: 100, typ: testdb.Ptr("Soyuz"), mission: testdb.Ptr("Moon"), launched: t1},
 	} {
 		insertRocket(t, p, r)
 	}
@@ -140,7 +102,7 @@ func TestRocketVisibilityThroughProcessing(t *testing.T) {
 
 func TestRocketExactChannel(t *testing.T) {
 	_, p := testdb.Migrated(t)
-	insertRocket(t, p, stored{channel: "abc-1", typ: ptr("A"), mission: ptr("M"), launched: ptr(testdb.MessageTime)})
+	insertRocket(t, p, stored{channel: "abc-1", typ: testdb.Ptr("A"), mission: testdb.Ptr("M"), launched: testdb.Ptr(testdb.MessageTime)})
 	repo := repository.NewRockets(p)
 	for channel, want := range map[string]bool{"abc-1": true, "ABC-1": false, "abc": false, "missing": false} {
 		if _, ok, err := repo.Rocket(context.Background(), channel); err != nil || ok != want {
@@ -158,5 +120,17 @@ func TestRocketsUnavailable(t *testing.T) {
 	}
 	if _, err := repo.Rockets(context.Background(), handler.RocketQuery{Sort: handler.SortChannel, Order: handler.Asc}); !errors.Is(err, handler.ErrUnavailable) {
 		t.Errorf("Rockets on closed pool: %v, want ErrUnavailable", err)
+	}
+}
+
+// Every sort field the handler accepts must have an ORDER BY expression;
+// otherwise a valid request would fail with 500.
+func TestEverySortFieldIsSupported(t *testing.T) {
+	_, p := testdb.Migrated(t)
+	repo := repository.NewRockets(p)
+	for _, f := range handler.SortFields() {
+		if _, err := repo.Rockets(context.Background(), handler.RocketQuery{Sort: f, Order: handler.Asc}); err != nil {
+			t.Errorf("sort %q: %v", f, err)
+		}
 	}
 }

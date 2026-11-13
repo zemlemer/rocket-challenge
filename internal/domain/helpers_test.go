@@ -1,6 +1,7 @@
 package domain_test
 
 import (
+	"rockets/internal/testdb"
 	"strconv"
 	"time"
 
@@ -9,16 +10,14 @@ import (
 
 var t0 = time.Date(2022, 2, 2, 18, 39, 5, 0, time.UTC)
 
-func ptr[T any](v T) *T { return &v }
-
 // entry builds an inbox entry with full metadata and the given payload.
 func entry(id int64, channel string, number int64, typ, payload string) domain.InboxEntry {
 	return domain.InboxEntry{
 		ID:            id,
-		Channel:       ptr(channel),
-		MessageNumber: ptr(number),
-		MessageTime:   ptr(t0.Add(time.Duration(number) * time.Second)),
-		MessageType:   ptr(typ),
+		Channel:       testdb.Ptr(channel),
+		MessageNumber: testdb.Ptr(number),
+		MessageTime:   testdb.Ptr(t0.Add(time.Duration(number) * time.Second)),
+		MessageType:   testdb.Ptr(typ),
 		Body:          []byte(`{"metadata":{},"message":` + payload + `}`),
 	}
 }
